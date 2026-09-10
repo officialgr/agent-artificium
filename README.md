@@ -5,7 +5,7 @@
 > [!NOTE]
 > **From the creator**
 >
-> I built Artificium for myself and have been using it as my own harness. This is its first public release: I am sharing it because I think the design could be useful to others, and I want to develop it into a general harness for continual learning and self-improvement. It is a personal experiment that I want to improve with others.
+> I built Artificium for myself and have been using it as my own harness. This is its first public release: I am sharing it because I think the design could be useful to others, and I want to develop it into a general harness for continual learning and self-improvement.
 
 Artificium is designed to give an agent **full control over its own environment**, let it **work indefinitely with or without external interactions**, and **retain its experience for future retrieval**. The agent **manages its own context window**: it chooses what stays always loaded, what to offload into long-term memory, and what to retrieve or revisit. Across that continuous life-loop, it can build tools, revise its Self, and improve its own methods. The aim is to make its entire history available for learning while keeping its active context focused on the work at hand.
 

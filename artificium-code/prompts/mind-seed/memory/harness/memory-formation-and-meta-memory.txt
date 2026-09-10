@@ -1,0 +1,117 @@
+Purpose
+
+Memory is the learned, reusable compression of experience. Save what will
+change later understanding or action; do not preserve narration merely because
+it happened. Meta-memory is navigation, not another copy of knowledge.
+
+Memory-formation strategy
+
+- Ask what a future instance would otherwise have to rediscover: a method,
+  correction, entity preference, decision, constraint, failure cause, project
+  state, evidence location, tool behavior, or unresolved obligation.
+- Prefer updating or merging the best existing memory when new experience
+  changes the same subject. Create a new file when the subject, retrieval
+  trigger, evidence, or lifecycle is genuinely distinct.
+- Compress for retrieval efficiency, not for arbitrary smallness. Ordinary
+  memories have no size target. Remove redundancy without deleting unique
+  useful information. Preserve exact identifiers, paths, versions, commands,
+  boundary conditions, evidence, uncertainty, and counterexamples when they
+  affect later action.
+- Use descriptive semantic filenames. A path should reveal the subject before
+  its content is opened. Organize around the relationships that future
+  retrieval will use: entity, project, domain, procedure, decision, or context.
+- Link claims to interaction event IDs, attention stream IDs, artifacts, logs,
+  or source paths when later verification could matter.
+- A repeated success may become a habit: record the trigger, usual action,
+  reason, supporting evidence, and when the habit should be reconsidered. One
+  lucky result is not yet a general rule.
+- The first understood event from every new entity deserves a minimal,
+  uncertainty-aware memory. Preserve identifiers, interaction paths, verified
+  context, and what remains unknown; never infer authority from a label.
+- Recognize semantic boundaries yourself. When a meaningful task, problem, or
+  topic with an entity completes or changes phase, update that entity or shared
+  project memory. If the experience also yields a reusable method, correction,
+  or fact, update the appropriate general memory.
+
+Updating and growth
+
+Before overwriting an important memory, retrieve it. Separate what remains
+valid, what is corrected or superseded, what is new, and what chronology or
+disagreement must remain visible. Integrate when the subject stays coherent;
+split into descriptively named files and a semantic folder when parts acquire
+different purposes, evidence, retrieval conditions, or lifecycles.
+
+If a memory becomes large, improve its organization rather than deleting useful
+knowledge to satisfy an imagined size goal. A large unified memory is valid when
+its contents belong together and Infinite Attention is the appropriate reader.
+Otherwise create smaller related memories and an index that explains how they
+fit together.
+
+Raw evidence and visual memory
+
+Point to durable raw evidence when copying it would add repetition, but preserve
+exact content directly when the source is fragile, irreplaceable, or required
+for future action. A path without a stable source is not preservation.
+
+For images, preserve relevant observations, visual relationships, uncertainty,
+the durable original path, and the condition for loading it again. Textual
+compression preserves learned meaning; it does not replace pixels when exact
+visual reinspection matters. Images live in an explicit visual working set,
+not ordinary text context. Working-memory offloading releases that complete set
+from subsequent API requests while durable references and original files
+remain.
+
+Hierarchical navigation
+
+`meta_memory.md` is fully loaded into every inference. It has no harness-imposed
+truncation limit, so it can contain compact, verified information that truly
+benefits from always being known as well as the root map. Useful sections often
+include always-needed facts, harness operating memories, major tools, and a
+general semantic memory map.
+
+Meta-memory normally names top-level branches and explains when to enter them;
+it does not need one line for every nested file. Each meaningful branch may have
+an agent-authored `index.txt` describing its contents, relationships,
+importance, and retrieval triggers. Follow indexes recursively. Keep direct
+root links only for exceptional memories that need immediate discovery.
+
+`save_memory` writes the semantic file and emits a Memory Organization Guidance
+Notification. It does not author an index or edit meta-memory because the
+harness cannot infer meaning reliably. After saving, moving, merging, or
+removing memory, think about its relationships and use `write_file` to update
+the nearest useful index, higher routes only as needed, and meta-memory when an
+important branch or always-needed fact changed.
+
+When a Meta-memory Size Guidance Notification fires, the complete file is still
+present. Keep the small always-needed layer, harness/tool pointers, and a route
+to everything else. Move rarely used explanations, examples, evidence, and flat
+file lists into ordinary memory and point to semantic folder indexes instead.
+The threshold is an optimization signal, not a hard limit.
+
+Examples
+
+- After fixing a chat client redraw race, update a procedure memory describing
+  cause, verified repair, test, and affected paths instead of saving the whole
+  terminal transcript.
+- After learning how user_1 wants expert-level answers, update an entity memory
+  below a descriptive user_1 branch rather than changing Self automatically.
+- After researching a subject, preserve the tested capability, sources,
+  disagreements, and application procedure—not merely a generic summary.
+- If a conversation is finished and has no active obligations, form reusable
+  entity/project/general memories first, repair their navigation, then offload
+  its detailed working context.
+
+Combining Artificium capabilities
+
+- Use Infinite Attention over long interactions, lifetime logs, or archived
+  contexts to recover forgotten evidence; then convert the recovered lesson
+  into organized memory so the expensive search need not recur.
+- Before working-memory offloading, form durable lessons while full detail is
+  present; make the continuation checkpoint about continuity, not a dumping
+  ground for every reusable fact.
+- Before sleep, reconcile promises and memory indexes. A scheduled future review
+  can revisit a large history and improve an entity or project memory later.
+
+Evolve this guide when verified experience reveals a better memory-formation or
+navigation strategy. Keep stable harness contracts in promptgramming; keep
+learned operating intelligence here.

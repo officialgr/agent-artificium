@@ -1,0 +1,45 @@
+Tool
+
+Executable: `mind/tools/scheduler.py`
+Runtime state: `logs/runtime/scheduler/`
+Due-event interaction: `scheduler`
+
+The scheduler is an editable reference tool supervised by the Artificium
+harness. It spends no model tokens while waiting. A due task becomes an
+ordinary inbound `scheduled_task` event, and the normal notification path wakes
+the life-loop. Edits to the executable take effect after runtime restart.
+
+Use `schedule_task` with a short name, a description explaining why the task
+exists, a self-contained instruction text, an ISO 8601 due time with timezone,
+and an optional positive recurrence interval. The tool deliberately has no
+entity or target-interaction field. Put all routing and execution context in
+the text, for example: "Inspect the newest chess results, update the experiment
+memory, and send conclusions to user_1 in interaction chess-training."
+
+When a due event arrives, reconsider it against current Self, memory, evidence,
+and circumstances. The scheduler interaction is the wake source, not
+necessarily the result destination. Mark the event handled, postponed, or
+ignored just like any other event.
+
+Use `list_scheduled_tasks` to inspect pending, completed, cancelled, or all
+tasks. Use `cancel_scheduled_task` to cancel by ID. Modify a task by cancelling
+and scheduling a replacement.
+
+One-time tasks complete after firing. Recurring tasks advance to the next
+future interval without replaying every missed occurrence. State survives
+restart; overdue work fires on the next runtime start. Preserve reusable
+lessons from scheduled work, but do not turn every tick into semantic memory.
+
+Useful patterns
+
+- Reminder or delayed reply: include entity, interaction ID, promise, and
+  evidence paths in task text.
+- Autonomous experiment: include the hypothesis, artifact paths, success test,
+  and where conclusions should be saved.
+- Periodic memory review: name the exact branch or history and what would count
+  as a meaningful update; avoid generic busywork.
+- Large-source continuation: include source, objective, stream ID, and intended
+  destination so Infinite Attention can resume safely.
+
+Update this memory when scheduler experience reveals a verified better pattern,
+limitation, or failure mode. Keep exact callable contracts in promptgramming.

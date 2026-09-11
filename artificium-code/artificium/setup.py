@@ -69,6 +69,8 @@ class SetupOptions:
     vision: str | None = None
     mandatory_offload: bool | None = None
     offload_threshold_percent: float | None = None
+    working_memory_tokens: str | None = None
+    emergency_offload: bool | None = None
     force: bool = False
 
 
@@ -629,10 +631,13 @@ class SetupWizard:
         values: dict[str, object] = {}
         if options.heartbeat_supplied:
             values["heartbeat_seconds"] = options.heartbeat_seconds
-        for name in ("mandatory_offload", "offload_threshold_percent"):
+        for name in ("mandatory_offload", "offload_threshold_percent", "emergency_offload"):
             value = getattr(options, name)
             if value is not None:
                 values[name] = value
+        if options.working_memory_tokens is not None:
+            raw = str(options.working_memory_tokens).strip().lower()
+            values["working_memory_tokens"] = None if raw == "same" else int(raw)
         values["vision_preference"] = options.vision if options.vision is not None else (
             current.vision_preference if current else "auto")
         return values
@@ -656,15 +661,25 @@ class SetupWizard:
             options.heartbeat_supplied = True
         if options.vision is None:
             options.vision = _choice("Vision (auto detects image support; yes requires it; no disables it)", ["auto", "yes", "no"], current.vision_preference if current else "auto")
+        if options.working_memory_tokens is None:
+            default = str(current.working_memory_tokens) if current and current.working_memory_tokens else "same"
+            while True:
+                raw = _ask("Working-memory target in tokens, or same as model context", default).lower()
+                if raw == "same" or (raw.isdecimal() and int(raw) >= 4000):
+                    options.working_memory_tokens = raw
+                    break
+                print("Enter at least 4000 tokens, or same.")
         if options.mandatory_offload is None:
-            options.mandatory_offload = _yes("Require offloading at a context threshold", current.mandatory_offload if current else False)
+            options.mandatory_offload = _yes("Require offloading at a working-memory threshold", current.mandatory_offload if current else False)
         if options.mandatory_offload and options.offload_threshold_percent is None:
             options.offload_threshold_percent = _number("Offload threshold percent", current.offload_threshold_percent if current else 80, minimum=1, maximum=95)
+        if options.emergency_offload is None:
+            options.emergency_offload = _yes("Allow an isolated summary helper to recover from context exhaustion", current.emergency_offload if current else False)
 
     @staticmethod
     def _validate_scope(options: SetupOptions) -> None:
         if options.scope == "model" and (options.heartbeat_supplied or any(
-            getattr(options, name) is not None for name in ("vision", "mandatory_offload", "offload_threshold_percent")
+            getattr(options, name) is not None for name in ("vision", "mandatory_offload", "offload_threshold_percent", "working_memory_tokens", "emergency_offload")
         )):
             raise ValueError("Use configure harness for heartbeat, vision, and offloading settings")
         if options.scope == "harness" and (options.reset_generation_settings or any(

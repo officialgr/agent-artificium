@@ -1,9 +1,14 @@
 [SYSTEM NOTIFICATION — MANDATORY WORKING-MEMORY OFFLOADING]
 
-The operator enabled mandatory offloading at {threshold_percent}% of estimated
-context capacity. That threshold was reached. Ordinary actions are now withheld
+The operator enabled mandatory offloading at {{threshold_percent}}% of the
+working-memory target. That threshold was reached, or remaining model context
+is needed for generation. Ordinary actions are now withheld
 until the existing offload_working_memory process completes successfully. This
 is an operator requirement, beyond the ordinary advisory context milestones.
+
+Preflight input count before this notice: {{input_tokens}} tokens
+({{token_count_source}}); working-memory target: {{working_memory_tokens}} tokens.
+The harness recounts the complete request with this notice before sending it.
 
 Call offload_working_memory without reflection_complete first. While detail is
 still present, form reusable memories and a self-sufficient continuation. Then

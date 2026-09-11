@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import ConfigStore, SecretsStore
-from .engine import Engine, EngineError, EngineReply, make_engine
+from .engine import Engine, EngineError, EngineReply, PreparedRequest, make_engine
+from .context_budget import (TokenCount, available_output, budget_request, context_exhausted,
+                             limit_output, measure, output_reserve)
 from .filesystem import (
     Paths,
     atomic_write_json,
@@ -25,6 +27,7 @@ from .life_loop import ToolIntent, parse_life_loop_output, render_normalized_lif
 from .memory import InfiniteAttention, LongTermMemory, TokenEstimator, WorkingMemory
 from .prompts import PromptPack
 from .records import Console, Records
+from .recovery import MAX_RECOVERY_ATTEMPTS, summarize
 from .tool_loader import load_mind_tool
 from .tools import ToolExecution, ToolRegistry
 from .vision import VisualContext
@@ -200,7 +203,7 @@ class Artificium:
         return self.estimator.text(text)
 
     def _state_header(self, wake_reason: str, context_tokens: int) -> str:
-        percent = context_tokens / self.config.context_window_tokens * 100
+        percent = context_tokens / self.config.working_memory_limit * 100
         if percent >= self.config.context_hard_fraction * 100:
             status = "hard pressure"
         elif percent >= self.config.context_soft_fraction * 100:
@@ -243,6 +246,7 @@ class Artificium:
             engine_name=f"{self.config.provider}/{self.config.model}",
             context_tokens=context_tokens,
             context_window_tokens=self.config.context_window_tokens,
+            working_memory_tokens=self.config.working_memory_limit,
             context_percent=f"{percent:.1f}",
             tokens_since_last_notice=max(0, context_tokens - prior),
             context_status=status,
@@ -298,12 +302,13 @@ class Artificium:
         )
 
     def _request_messages(
-        self, inputs: list[str], *, wake_reason: str
+        self, inputs: list[str], *, wake_reason: str,
+        working: list[dict[str, Any]] | None = None, include_images: bool = True,
     ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system_prompt(wake_reason)}
         ]
-        messages.extend(self.working.load())
+        messages.extend(self.working.load() if working is None else working)
         if inputs:
             messages.append(
                 {
@@ -313,7 +318,7 @@ class Artificium:
                 }
             )
         visual_message = self.visual.request_message()
-        if visual_message is not None:
+        if include_images and visual_message is not None:
             messages.append(visual_message)
         return messages
 
@@ -360,11 +365,16 @@ class Artificium:
     def _complete(
         self, messages: list[dict[str, Any]], *, wake_reason: str,
         pending_inputs: list[str] | None = None,
+        prepared: PreparedRequest | None = None, count: TokenCount | None = None,
     ) -> tuple[str, EngineReply]:
         request_id = sortable_id("request_")
         request_log_path = self.paths.model_log / f"{request_id}.json"
-        estimated = self.estimator.messages(messages)
-        request_parameters = self.engine.request_summary()
+        prepared = prepared or limit_output(self.engine.prepare(messages), output_reserve(self.config), self.config)
+        count = count or measure(self.engine, prepared, messages, self.estimator)
+        prepared = budget_request(prepared, self.config, count)
+        estimated = count.tokens
+        request_parameters = prepared.safe_summary()
+        request_parameters["token_count"] = {"tokens": count.tokens, "source": count.source}
         fingerprints = self.prompts.fingerprints()
         pack_sha256 = hashlib.sha256(json_dumps(fingerprints).encode("utf-8")).hexdigest()
         if pack_sha256 != self.prompt_pack_sha256:
@@ -380,6 +390,7 @@ class Artificium:
             "model_request",
             request_id=request_id,
             estimated_tokens=estimated,
+            token_count_source=count.source,
             message_count=len(messages),
             prompt_pack=self.prompts.version,
             prompt_pack_sha256=self.prompt_pack_sha256,
@@ -392,13 +403,14 @@ class Artificium:
             provider=self.config.provider,
             model=self.config.model,
             adapter=self.config.adapter,
+            token_count_source=count.source,
             request_parameters=request_parameters.get("body"),
         )
         self.console.line(
             "engine",
             (
                 f"request {request_id} sent to {self.config.provider}/{self.config.model} "
-                f"(~{estimated:,} input tokens estimated)"
+                f"({estimated:,} input tokens, {count.source})"
             ),
         )
         self.console.line(
@@ -446,7 +458,7 @@ class Artificium:
         )
         wait_thread.start()
         try:
-            reply = self.engine.complete(messages)
+            reply = self.engine.complete_prepared(prepared)
         except KeyboardInterrupt:
             elapsed = time.monotonic() - started
             self.records.model_exchange(
@@ -473,12 +485,14 @@ class Artificium:
             )
             raise
         except EngineError as exc:
+            exc.request_log_path = str(request_log_path)
             elapsed = time.monotonic() - started
             self.records.model_exchange(
                 request_id=request_id,
                 messages=messages,
                 request_parameters=request_parameters,
                 error=str(exc),
+                response=vars(exc.reply) if exc.reply is not None else None,
             )
             self.records.emit(
                 "model_request_failed",
@@ -717,18 +731,104 @@ class Artificium:
             state["recovered_at"] = utc_now()
             atomic_write_json(self.paths.sleep_state, state)
 
-    def _mandatory_offload_required(self, estimated: int) -> bool:
+    def _mandatory_offload_required(self, estimated: int, *, generation_room: int | None = None) -> bool:
         if not self.config.mandatory_offload:
             return False
         state = self.tools._control()
         pending = state.get("mandatory_offload_pending")
-        if not pending and estimated >= self.config.context_window_tokens * self.config.offload_threshold_percent / 100:
+        if not pending and (
+            estimated >= self.config.working_memory_limit * self.config.offload_threshold_percent / 100
+            or (generation_room is not None and generation_room < output_reserve(self.config))
+        ):
             state["mandatory_offload_pending"] = {"requested_at": utc_now(), "estimated_tokens": estimated}
             self.tools._save_control(state)
             self.records.emit("mandatory_offload_required", estimated_tokens=estimated,
                               threshold_percent=self.config.offload_threshold_percent)
             pending = True
         return bool(pending)
+
+    @property
+    def _emergency_state_path(self) -> Path:
+        return self.paths.runtime / "emergency-offload.json"
+
+    def _emergency_offload(self, error: EngineError, inputs: list[str]) -> bool:
+        """Replace working context only after a complete, bounded continuation fits.
+
+        Incoming messages stay in the queue, and no prior tool action is replayed.
+        Attempts persist until a normal request succeeds, including across restart.
+        """
+        state = read_json(self._emergency_state_path, {})
+        history = self.working.load()
+        original_log = getattr(error, "request_log_path", None) or str(self.paths.model_log)
+        last_error = state.get("last_error") or str(error)
+        while int(state.get("attempts", 0)) < MAX_RECOVERY_ATTEMPTS and not self._stop:
+            attempt = int(state.get("attempts", 0)) + 1
+            state.update(attempts=attempt, started_at=utc_now(), original_log=original_log,
+                         error=str(error), completed=False)
+            atomic_write_json(self._emergency_state_path, state)
+            self.console.line("recovery", f"Emergency summary attempt {attempt}/{MAX_RECOVERY_ATTEMPTS}")
+            self.records.life("emergency_offload_started", **state)
+            try:
+                summary, omitted = summarize(
+                    config=self.config, api_key=self.api_key, history=history,
+                    original_log=original_log, attempt=attempt,
+                    prompts=self.prompts, records=self.records,
+                )
+                if self._stop:
+                    return False
+                checkpoint = self.paths.memory / "recovery" / f"{sortable_id('emergency_')}.txt"
+
+                def notice(archive: str) -> str:
+                    return self.prompts.event(
+                        "emergency_offload", error=str(error), original_log=original_log,
+                        archive=archive, checkpoint=str(checkpoint), omitted=omitted, summary=summary,
+                    )
+
+                candidate = self._request_messages(
+                    inputs, wake_reason="emergency_offload",
+                    working=[{"role": self.config.runtime_message_role,
+                              "content": notice(str(self.paths.context_archive / ('emergency-' + 'x' * 100 + '.jsonl')))}],
+                    include_images=False,
+                )
+                prepared = limit_output(self.engine.prepare(candidate), output_reserve(self.config), self.config)
+                count = measure(self.engine, prepared, candidate, self.estimator)
+                budget_request(prepared, self.config, count)
+                if (available_output(self.config, count) < output_reserve(self.config)
+                    or count.tokens >= self.config.working_memory_limit * self.config.offload_threshold_percent / 100):
+                    raise EngineError("The rebuilt request still leaves too little room to continue. Pinned instructions or pending input may be too large.", kind="context")
+                if history != self.working.load():
+                    raise EngineError("Working context changed during recovery; refusing to overwrite it.", kind="context")
+            except EngineError as exc:
+                last_error = str(exc)
+                state["last_error"] = last_error
+                atomic_write_json(self._emergency_state_path, state)
+                self.records.life("emergency_offload_failed", attempt=attempt, error=last_error)
+                continue
+
+            # Commit uses the same archive/replacement mechanism as normal offloading.
+            # The helper never executes tools or writes to the agent's files itself.
+            atomic_write_text(checkpoint, summary + "\n")
+            result = self.working.offload(
+                title="emergency-context-recovery", compression=summary,
+                reason="context_exhaustion", memory_path=checkpoint,
+                replacement_builder=lambda values: notice(values["source_archive_path"]),
+            )
+            self.visual.release(all_images=True, reason="emergency_offload")
+            control = self.tools._control()
+            for key in ("working_memory_offload_pending", "mandatory_offload_pending", "compaction_pending"):
+                control.pop(key, None)
+            self.tools._save_control(control)
+            state.update(completed=True, checkpoint=str(checkpoint), archive=result["archive"])
+            atomic_write_json(self._emergency_state_path, state)
+            self.records.life("emergency_offload_completed", **state)
+            self.console.line("recovery", f"Working context recovered; archive: {result['archive']}")
+            return True
+        if self._stop:
+            return False
+        raise EngineError(
+            f"Emergency offloading stopped after {state.get('attempts', 0)} attempts: {last_error}",
+            kind="context", hint="Original records and pending messages are retained. Inspect the recovery logs before restarting.",
+        )
 
     def _offload_tool_error(self, intent: ToolIntent, call_index: int) -> dict[str, Any] | None:
         allowed = intent.name in {
@@ -756,7 +856,7 @@ class Artificium:
         overhead = self._prompt_overhead()
         notice = self.working.pressure_notice(overhead)
         total = self.working.estimated_tokens(overhead)
-        fraction = total / self.config.context_window_tokens
+        fraction = total / self.config.working_memory_limit
         result: list[str] = []
         if notice:
             milestone = int(notice["milestone"])
@@ -765,7 +865,7 @@ class Artificium:
                     "context_milestone",
                     milestone_tokens=self.config.context_reminder_tokens,
                     context_tokens=total,
-                    context_window_tokens=self.config.context_window_tokens,
+                    context_window_tokens=self.config.working_memory_limit,
                     context_percent=f"{fraction * 100:.1f}",
                     next_milestone_tokens=milestone + self.config.context_reminder_tokens,
                 )
@@ -777,7 +877,7 @@ class Artificium:
                 self.prompts.event(
                     "context_pressure",
                     context_tokens=total,
-                    context_window_tokens=self.config.context_window_tokens,
+                    context_window_tokens=self.config.working_memory_limit,
                     context_percent=f"{fraction * 100:.1f}",
                     soft_threshold_percent=f"{self.config.context_soft_fraction * 100:.0f}",
                     hard_threshold_percent=f"{self.config.context_hard_fraction * 100:.0f}",
@@ -940,32 +1040,47 @@ class Artificium:
                 )
                 pulse_used = True
             messages = self._request_messages(inputs, wake_reason=trigger)
-            estimated = self.estimator.messages(messages)
-            mandatory_offload = self._mandatory_offload_required(estimated)
-            if mandatory_offload:
-                inputs.append(self.prompts.event(
-                    "mandatory_offload", threshold_percent=f"{self.config.offload_threshold_percent:g}"))
-                messages = self._request_messages(inputs, wake_reason=trigger)
-                estimated = self.estimator.messages(messages)
-            context_percent = (
-                estimated / self.config.context_window_tokens * 100
-                if self.config.context_window_tokens
-                else 0.0
-            )
-            context_data = {
-                "round": round_number,
-                "estimated_tokens": estimated,
-                "context_window_tokens": self.config.context_window_tokens,
-                "context_percent": round(context_percent, 3),
-                "wake_reason": trigger,
-            }
-            self.records.emit(
-                "context_usage_measured", turn_id=turn_id, **context_data
-            )
-            self.records.life("context_usage", turn_id=turn_id, **context_data)
-            self.console.context(estimated, self.config.context_window_tokens)
+            count = None
+            prepared = None
             try:
-                request_id, reply = self._complete(messages, wake_reason=trigger, pending_inputs=inputs)
+                prepared = limit_output(self.engine.prepare(messages), output_reserve(self.config), self.config)
+                count = measure(self.engine, prepared, messages, self.estimator)
+                mandatory_offload = self._mandatory_offload_required(
+                    count.tokens, generation_room=available_output(self.config, count))
+                if mandatory_offload:
+                    inputs.append(self.prompts.event(
+                        "mandatory_offload", threshold_percent=f"{self.config.offload_threshold_percent:g}",
+                        input_tokens=count.tokens, token_count_source=count.source,
+                        working_memory_tokens=self.config.working_memory_limit))
+                    messages = self._request_messages(inputs, wake_reason=trigger)
+                    prepared = limit_output(self.engine.prepare(messages), output_reserve(self.config), self.config)
+                    count = measure(self.engine, prepared, messages, self.estimator)
+                context_data = {
+                    "round": round_number, "estimated_tokens": count.tokens,
+                    "token_count_source": count.source,
+                    "context_window_tokens": self.config.context_window_tokens,
+                    "working_memory_tokens": self.config.working_memory_limit,
+                    "context_percent": round(count.tokens / self.config.context_window_tokens * 100, 3),
+                    "wake_reason": trigger,
+                }
+                self.records.emit("context_usage_measured", turn_id=turn_id, **context_data)
+                self.records.life("context_usage", turn_id=turn_id, **context_data)
+                self.console.context(count.tokens, self.config.context_window_tokens, source=count.source)
+                request_id, reply = self._complete(messages, wake_reason=trigger, pending_inputs=inputs,
+                                                   prepared=prepared, count=count)
+            except EngineError as exc:
+                for item in claimed:
+                    self.notifications.release(item)
+                if not getattr(exc, "request_log_path", None):
+                    failed_id = sortable_id("request_")
+                    exc.request_log_path = str(self.paths.model_log / f"{failed_id}.json")
+                    self.records.model_exchange(request_id=failed_id, messages=messages,
+                                                request_parameters=prepared.safe_summary() if prepared else {}, error=str(exc))
+                if self.config.emergency_offload and context_exhausted(exc, self.config, count):
+                    if self._emergency_offload(exc, inputs):
+                        pulse_used = first_wake_issued = meta_memory_guidance_issued = False
+                        continue
+                raise
             except KeyboardInterrupt:
                 for item in claimed:
                     self.notifications.release(item)
@@ -997,6 +1112,7 @@ class Artificium:
                 )
                 break
             self._append_runtime(inputs, origin="life_loop_input")
+            self._emergency_state_path.unlink(missing_ok=True)
             self._acknowledge_recovery(recovery)
             for item in claimed:
                 self.notifications.commit(item)
@@ -1315,6 +1431,8 @@ class Artificium:
             "visual_context_tokens": visual_tokens,
             "active_images": self.visual.list(),
             "context_window_tokens": self.config.context_window_tokens,
+            "working_memory_tokens": self.config.working_memory_limit,
+            "emergency_offload": self.config.emergency_offload,
             "meta_memory_tokens": meta_metrics["tokens"],
             "meta_memory_words": meta_metrics["words"],
             "meta_memory_characters": meta_metrics["characters"],

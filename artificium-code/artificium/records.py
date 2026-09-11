@@ -203,9 +203,10 @@ class Console:
         suffix = f" ({', '.join(extras)})" if extras else ""
         self.line("result", f"{name}: {summary}{suffix}")
 
-    def context(self, tokens: int, window: int) -> None:
+    def context(self, tokens: int, window: int, *, source: str = "estimate") -> None:
         percent = tokens / window * 100 if window else 0
-        self.line("context", f"~{tokens:,} / {window:,} tokens ({percent:.1f}%)")
+        prefix = "~" if source == "estimate" else ""
+        self.line("context", f"{prefix}{tokens:,} / {window:,} tokens ({percent:.1f}%; {source})")
 
     def usage(self, usage: dict[str, Any]) -> None:
         if not usage:

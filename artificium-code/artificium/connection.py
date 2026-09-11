@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Config
-from .discovery import _openai_base_root, api_headers
-from .engine import EngineError, EngineReply, make_engine, request_json
+from .context_budget import budget_request, limit_output, measure, output_reserve
+from .engine import EngineError, EngineReply, make_engine
 from .filesystem import Paths, read_json, read_jsonl, utc_now
 from .memory import TokenEstimator
 from .prompts import PromptPack
@@ -50,7 +50,8 @@ def preview_messages(paths: Paths, config: Config, *, self_directive: str | None
         "state_header", timestamp=utc_now(), wake_reason="connection_check",
         engine_name=f"{config.provider}/{config.model}", context_tokens=estimated,
         context_window_tokens=config.context_window_tokens,
-        context_percent=f"{estimated / config.context_window_tokens * 100:.1f}",
+        working_memory_tokens=config.working_memory_limit,
+        context_percent=f"{estimated / config.working_memory_limit * 100:.1f}",
         tokens_since_last_notice=0, context_status="connection check",
         current_interaction_or_none="none", pending_event_count=0,
         active_stream_or_none="none", pre_sleep_issued=False,
@@ -75,37 +76,16 @@ def preview_messages(paths: Paths, config: Config, *, self_directive: str | None
 
 
 def prompt_tokens(config: Config, key: str | None, messages: list[dict[str, Any]]) -> tuple[int, str]:
-    estimate = TokenEstimator(config.chars_per_token).messages(messages)
-    if config.adapter != "llamacpp":
-        return estimate, "estimate"
     engine = make_engine(config, key)
-    prepared = engine.prepare(messages)
-    root = _openai_base_root(config.base_url)
-    headers = api_headers("llamacpp", key, config.headers)
-    # These are optional read-only endpoints. A failed tokenizer must not be
-    # confused with an inference failure; the full inference still follows.
-    body = {name: value for name, value in prepared.payload.items()
-            if name in {"model", "messages", "reasoning_effort", "chat_template_kwargs"}}
-    try:
-        formatted = request_json(f"{root}/apply-template", payload=body, headers=headers,
-                                 timeout=min(config.request_timeout_seconds, 30), secrets=[key])
-        if not isinstance(formatted.get("prompt"), str):
-            return estimate, "estimate"
-        counted = request_json(f"{root}/tokenize", payload={"model": config.model,
-                               "content": formatted["prompt"], "add_special": False,
-                               "parse_special": True}, headers=headers,
-                               timeout=min(config.request_timeout_seconds, 30), secrets=[key])
-        if isinstance(counted.get("tokens"), list) and counted["tokens"]:
-            return len(counted["tokens"]), "server tokenizer"
-    except EngineError:
-        pass
-    return estimate, "estimate"
+    prepared = limit_output(engine.prepare(messages), output_reserve(config), config)
+    count = measure(engine, prepared, messages, TokenEstimator(config.chars_per_token))
+    return count.tokens, count.source
 
 
 def check_capacity(config: Config, tokens: int, source: str) -> None:
     # Reserve space for a useful answer (including reasoning). Never silently
     # truncate pinned memory/history or claim a larger server allocation.
-    reserve = config.max_output_tokens or (8192 if config.adapter == "anthropic" else 2048)
+    reserve = output_reserve(config)
     if tokens + reserve > config.context_window_tokens:
         approximate = "approximately " if source == "estimate" else ""
         required = tokens + reserve
@@ -170,12 +150,14 @@ def verify_connection(paths: Paths, config: Config, key: str | None, *,
     """Only return readiness after real inference with the complete harness input."""
     started = time.monotonic()
     messages = preview_messages(paths, config, self_directive=self_directive, include_images=False)
-    tokens, source = prompt_tokens(config, key, messages)
+    engine = make_engine(config, key)
+    prepared = limit_output(engine.prepare(messages), output_reserve(config), config)
+    count = measure(engine, prepared, messages, TokenEstimator(config.chars_per_token))
+    tokens, source = count.tokens, count.source
     check_capacity(config, tokens, source)
     report(f"Checking Artificium's full prompt: {tokens:,} input tokens ({source}). This sends a real request.")
-    engine = make_engine(config, key)
     with _progress(report, "Model check"):
-        reply = engine.complete(messages)
+        reply = engine.complete_prepared(budget_request(prepared, config, count))
     actual = _input_tokens(reply)
     if reply.raw.get("truncated") is True:
         raise EngineError("The server truncated the connection-check prompt.", kind="context",
@@ -184,7 +166,7 @@ def verify_connection(paths: Paths, config: Config, key: str | None, *,
         check_capacity(config, actual, "server usage")
         # Ollama truncates overlong input internally. Reject a clear discrepancy
         # when exact tokenization is available; estimates are not exact counts.
-        if source == "server tokenizer" and actual < tokens * 0.95:
+        if source == "provider" and actual < tokens * 0.95:
             raise EngineError("The server processed fewer tokens than its tokenizer reported.", kind="context",
                               hint="Check for server-side prompt truncation and increase its context allocation.")
     report("Text connection passed.")
@@ -206,7 +188,9 @@ def verify_connection(paths: Paths, config: Config, key: str | None, *,
                     raise EngineError("This custom JSON contract does not transmit image data.", kind="vision",
                                       hint="Use a contract that maps multimodal messages, or keep image input disabled.")
                 with _progress(report, "Image check"):
-                    image_engine.complete(image_messages)
+                    image_prepared = limit_output(image_engine.prepare(image_messages), output_reserve(vision_config), vision_config)
+                    image_count = measure(image_engine, image_prepared, image_messages, TokenEstimator(config.chars_per_token))
+                    image_engine.complete_prepared(budget_request(image_prepared, vision_config, image_count))
                 config = dataclasses.replace(config, model_supports_vision=True)
                 vision_checked = True
                 report("Image connection passed.")

@@ -2,7 +2,9 @@
 Timestamp: {{timestamp}}
 Wake reason: {{wake_reason}}
 Engine: {{engine_name}}
-Working context: approximately {{context_tokens}} / {{context_window_tokens}} tokens ({{context_percent}}%)
+Working-memory target: {{working_memory_tokens}} tokens; model serving context: {{context_window_tokens}} tokens
+Working context estimate: approximately {{context_tokens}} tokens ({{context_percent}}% of working-memory target)
+This header is a local estimate. The harness uses a provider preflight count when available to enforce offloading and generation budgets for the complete request.
 Tokens added since last context notice: {{tokens_since_last_notice}}
 Context status: {{context_status}}
 Pending interaction focus: {{current_interaction_or_none}}

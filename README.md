@@ -30,7 +30,7 @@ Extract the complete source archive. From the extracted project folder, run:
 python3 artificium.py
 ```
 
-The wizard asks for harness preferences—heartbeat, vision, and optional mandatory offloading—then your model service, address or key, and model. It detects context capacity where possible and uses server defaults for reasoning and sampling unless you customize them. Choose terminal chat after setup.
+The wizard asks for harness preferences—heartbeat, vision, working-memory target, and optional offloading—then your model service, address or key, and model. It detects context capacity where possible and uses server defaults for reasoning and sampling unless you customize them. Requests also reserve room for generation and have a bounded output allowance. Choose terminal chat after setup.
 
 Setup verifies the connection with real, potentially billable model requests before saving. It checks the full harness prompt and image input where applicable, without executing tools or retaining the diagnostic response.
 
@@ -209,7 +209,11 @@ Working memory is the finite context used for the current inference. The request
 
 The model determines what the checkpoint preserves. Archived context and durable interactions provide recovery sources if something was omitted.
 
-Optional **mandatory offloading** adds a runtime gate. It is off by default; when enabled, its default threshold is 80% estimated context usage. At the threshold, ordinary actions and sleep are withheld until offloading succeeds, while memory preparation remains available. The pending requirement survives restart. Estimates are approximate, so the model still needs enough room to prepare a useful checkpoint.
+Optional **mandatory offloading** adds a runtime gate. It is off by default; when enabled, its default threshold is 80% of the working-memory target. At the threshold, or when generation needs the remaining context, ordinary actions and sleep are withheld until offloading succeeds. Memory preparation remains available, and the pending requirement survives restart. The harness uses provider token counts where available and estimates otherwise.
+
+The working-memory target defaults to the model's serving context, but can be smaller. For example, a model actually serving 1,000,000 tokens can use a 100,000-token working-memory target, leaving room to finish an offload. This target applies to the complete input, including pinned instructions and active images; it does not silently truncate history.
+
+Optional **emergency offloading**, also off by default, can recover from context exhaustion. An isolated request to the same configured model and API summarizes a bounded excerpt of working history. The helper has its own generic summarization prompt and no tools or Artificium Self instructions. A complete summary is checked for room to resume before the usual archive/replacement mechanism commits it. A harness-written notice explains the error, the helper's intervention, omissions, and where to find the original records. Incoming messages, Self, tool files, and completed actions are retained.
 
 </details>
 
@@ -348,7 +352,7 @@ python3 artificium.py setup --provider custom --url http://MODEL_SERVER:8000/v1 
 
 Replace the placeholders with your server and model. For unattended setup, add `--yes` and supply all required values and credentials. Setup still verifies inference. Use `--model ID` when discovery offers several models. If capacity cannot be discovered, specify `--context-window TOKENS` using the actual serving limit. Interactive setup asks once; unattended setup otherwise uses a labelled 32,768-token working budget. A successful test does not verify the entire unknown limit.
 
-Context discovery uses the server's allocation where available: llama.cpp's serving `n_ctx`, vLLM's `max_model_len`, or provider metadata. GGUF training capacity is not a llama.cpp serving allocation. Ollama receives the configured window as `options.num_ctx`. Automatically detected limits refresh on reconnection; explicit manual limits persist. The connection check reserves output room and uses llama.cpp tokenization endpoints when available, otherwise labelling estimates.
+Context discovery uses the server's allocation where available: llama.cpp's serving `n_ctx`, vLLM's `max_model_len`, or provider metadata. GGUF training capacity is not a llama.cpp serving allocation. Ollama receives the configured window as `options.num_ctx`. Automatically detected limits refresh on reconnection; explicit manual limits persist. Connection checks and runtime use the same provider counting and output budgeting path.
 
 ### Credentials and connection checks
 
@@ -403,6 +407,7 @@ Settings live in an atomically saved `artificium-code/config.json`, with separat
 ```bash
 python3 artificium.py configure harness --heartbeat 30 --vision auto
 python3 artificium.py configure harness --mandatory-offload on --offload-threshold 80
+python3 artificium.py configure harness --working-memory-tokens 100000 --emergency-offload on
 python3 artificium.py connect --reasoning auto
 python3 artificium.py restart
 ```
@@ -412,15 +417,25 @@ python3 artificium.py restart
 | `--heartbeat SECONDS` | Opportunity for another turn while awake; default 30 seconds. `off` disables heartbeat, without cancelling startup, pending events, or ongoing work. |
 | `--vision auto`, `yes`, or `no` | Image preference, reconciled with discovered and tested model capabilities. |
 | `--mandatory-offload on` or `off` | Require a successful offload at the configured context threshold; **off by default**. |
-| `--offload-threshold PERCENT` | Estimated context threshold, from 1–95%; default 80%. |
-| `--context-window TOKENS` | Model serving capacity or a deliberate lower working limit. |
+| `--offload-threshold PERCENT` | Working-memory threshold, from 1–95%; default 80%. |
+| `--working-memory-tokens TOKENS` or `same` | Target for offloading and attention chunk sizes; default `same` follows model context. Explicit targets must fit inside model context. |
+| `--emergency-offload on` or `off` | Allow an isolated summary helper to recover context exhaustion; **off by default**. |
+| `--context-window TOKENS` | Actual model serving capacity; changing this value alone cannot enlarge a server. |
 | `--request-timeout SECONDS` | Inference request timeout; default 600 seconds. |
 
 ### Context and mandatory offloading
 
 When enabled, mandatory offloading is evaluated at inference boundaries. Reaching the threshold withholds ordinary tool actions and sleep until the two-stage offload succeeds. Memory preparation remains available, and the pending requirement survives restart. Context is not silently truncated to get past it.
 
-Runtime context estimates are approximate, using text size and an image allowance. A large input can cross a threshold in one step. Leave room for reflection and the next model response. A threshold below the pinned prompt size—or a checkpoint that barely reduces context—can repeatedly demand offloading. Check `status`, reduce unnecessary pinned material, adjust the threshold, or allocate more actual model context as appropriate.
+Token counting uses llama.cpp's native input-count endpoint when available; older builds can render and tokenize text-only requests. vLLM uses `/tokenize`; OpenAI Responses, Anthropic, and Gemini use their native input-count APIs. Unsupported endpoints, Ollama, OpenRouter, and generic/custom APIs retain the character estimate and image allowance. Counts are labelled `provider` or `estimate` in the life-loop. Provider counts may still differ from final usage, so generation leaves an additional margin.
+
+The complete input and the output allowance share the serving budget. The runtime supplies an output cap (normally up to 8,192 tokens when unset, smaller for small contexts), accounts for an explicit reasoning budget, and reduces the allowance when context is tight. Smaller explicit output caps are respected. Provider-specific output limits also apply to reasoning where the API supports that contract. Arbitrary custom JSON contracts need `$artificium.max_output_tokens` mapped to their real output-limit field. Exact counts cannot make an unbounded response fit in a finite window.
+
+A large tool result can still cross a threshold in one step. A threshold below the pinned prompt size—or a checkpoint that barely reduces context—can repeatedly demand offloading. Keep the working-memory target large enough for the full harness prompt, and the serving context larger when possible. To resync a separate target after changing models, use `configure harness --working-memory-tokens same`.
+
+With emergency offloading enabled, context-size errors and identifiable context exhaustion during generation invoke the helper. Its input and output are bounded, it requests disabled or reduced reasoning where supported, and unsuccessful attempts use smaller excerpts. At most three helper generation attempts are allowed before pausing; this bound survives restart until a normal model request succeeds. Truncated or invalid summaries and replacements that still do not fit leave the current working history intact. The helper cannot repair oversized pinned instructions or an oversized pending message by deleting them. Authentication, network, and unrelated input errors keep their existing error handling.
+
+Helper requests are recorded in `logs/model/emergency_summary_*.json`; the checkpoint and recovery notice point to the original request and archived context. Checkpoints may omit information, so they are recovery aids, not lossless replacements for the archive. This feature supports the built-in API adapters; arbitrary custom JSON APIs retain their existing pause behavior. It improves continuity but cannot guarantee uninterrupted service.
 
 The complete meta-memory is pinned without silent truncation; its default 8,000-token guidance threshold is a reminder to reorganize it, not a hard cap. Self has a 50,000-character prompt limit. Keep Self focused on lasting purpose and meta-memory focused on essential knowledge and navigation; put detailed material in ordinary memory.
 

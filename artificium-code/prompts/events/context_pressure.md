@@ -1,7 +1,8 @@
 [SYSTEM NOTIFICATION — WORKING-MEMORY PRESSURE]
 
-Working context is approximately {{context_tokens}} / {{context_window_tokens}}
-tokens ({{context_percent}}%). The soft working-memory-offload threshold is
+Working context is approximately {{context_tokens}} tokens against a
+{{context_window_tokens}}-token working-memory target ({{context_percent}}%).
+The soft working-memory-offload threshold is
 {{soft_threshold_percent}}%; the hard offload threshold is
 {{hard_threshold_percent}}%.
 

@@ -138,6 +138,8 @@ class Config:
     context_hard_fraction: float = 0.85
     mandatory_offload: bool = False
     offload_threshold_percent: float = 80.0
+    working_memory_tokens: int | None = None
+    emergency_offload: bool = False
     chars_per_token: float = 4.0
     broad_chunk_fraction: float = 0.50
     balanced_chunk_fraction: float = 0.20
@@ -217,6 +219,14 @@ class Config:
             raise ValueError("adapter must be one of: " + ", ".join(sorted(adapters)))
         if self.context_window_tokens < 4_000:
             raise ValueError("context_window_tokens must be at least 4000")
+        if self.working_memory_tokens is not None and (
+            isinstance(self.working_memory_tokens, bool)
+            or not isinstance(self.working_memory_tokens, int)
+            or not 4000 <= self.working_memory_tokens <= self.context_window_tokens
+        ):
+            raise ValueError("working_memory_tokens must be null (same as model), or 4000 through context_window_tokens")
+        if not isinstance(self.emergency_offload, bool):
+            raise ValueError("emergency_offload must be boolean")
         if self.context_reminder_tokens < 1_000:
             raise ValueError("context_reminder_tokens must be at least 1000")
         if self.meta_memory_guidance_tokens < 1_000:
@@ -308,6 +318,11 @@ class Config:
         ):
             raise ValueError("stop_sequences must be a list of non-empty strings")
 
+    @property
+    def working_memory_limit(self) -> int:
+        """An offloading target, never an increase to the server's capacity."""
+        return self.working_memory_tokens or self.context_window_tokens
+
     def chunk_tokens(self, profile: str) -> int:
         fractions = {
             "broad": self.broad_chunk_fraction,
@@ -316,13 +331,13 @@ class Config:
         }
         if profile not in fractions:
             raise ValueError("profile must be broad, balanced, or granular")
-        return max(1_000, int(self.context_window_tokens * fractions[profile]))
+        return max(1_000, int(self.working_memory_limit * fractions[profile]))
 
     def carry_tokens(self, profile: str) -> int:
         return max(
             1_000,
             min(
-                int(self.context_window_tokens * self.carry_fraction),
+                int(self.working_memory_limit * self.carry_fraction),
                 int(self.chunk_tokens(profile) * 0.50),
             ),
         )
@@ -375,7 +390,7 @@ class Config:
         values = self.public_dict()
         values.pop("schema_version", None)
         # Always show the small set of operator-facing harness policies.
-        for name in ("heartbeat_seconds", "vision_preference", "mandatory_offload", "offload_threshold_percent"):
+        for name in ("heartbeat_seconds", "vision_preference", "mandatory_offload", "offload_threshold_percent", "working_memory_tokens", "emergency_offload"):
             values[name] = getattr(self, name)
         return {
             "schema_version": 3,

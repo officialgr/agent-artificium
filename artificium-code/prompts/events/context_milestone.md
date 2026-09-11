@@ -3,8 +3,8 @@
 Your working context has grown by approximately {{milestone_tokens}} tokens
 since the previous milestone.
 
-Current working context: approximately {{context_tokens}} /
-{{context_window_tokens}} tokens ({{context_percent}}%).
+Current working context: approximately {{context_tokens}} tokens against a
+{{context_window_tokens}}-token working-memory target ({{context_percent}}%).
 Next milestone: approximately {{next_milestone_tokens}} tokens.
 
 You do not need to offload working memory merely because this notice appeared.

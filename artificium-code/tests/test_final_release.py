@@ -71,7 +71,9 @@ class FinalReleaseCase(unittest.TestCase):
         return agent
 
     def fill_context(self, agent):
-        agent.working.append({'role':'assistant','content':'source detail ' * 14000}, origin='test')
+        # Pressure remains below the serving limit so ordinary/offload actions
+        # have room to run. Actual overflow is covered by context recovery tests.
+        agent.working.append({'role':'assistant','content':'source detail ' * 9000}, origin='test')
 
     def image(self, name='image.png'):
         image = self.paths.root/name
@@ -195,14 +197,14 @@ class FinalReleaseCase(unittest.TestCase):
         self.assertTrue(json.loads(output.getvalue())['mandatory_offload'])
 
     def test_interactive_harness_edit_needs_no_model_or_provider_prompts(self):
-        with mock.patch('builtins.input', side_effect=['off','no','y','70','y']), redirect_stdout(io.StringIO()), \
+        with mock.patch('builtins.input', side_effect=['off','no','same','y','70','n','y']), redirect_stdout(io.StringIO()), \
              mock.patch('artificium.setup.discover_provider_models',side_effect=AssertionError('must not probe')):
             updated = SetupWizard(self.paths).reconfigure(SetupOptions(scope='harness'),interactive=True)
         self.assertEqual((updated.heartbeat_seconds,updated.vision,updated.offload_threshold_percent),(None,'no',70))
 
     def test_interactive_setup_asks_harness_before_provider_and_keeps_defaults(self):
         self.paths.config.unlink()
-        responses = iter(['','','n','custom','http://localhost:8000','local','50000','','n','y'])
+        responses = iter(['','','same','n','n','custom','http://localhost:8000','local','50000','','n','y'])
         prompts = []
         def answer(prompt):
             prompts.append(prompt)
@@ -211,7 +213,8 @@ class FinalReleaseCase(unittest.TestCase):
             SetupWizard(self.paths).run(SetupOptions(),interactive=True)
         self.assertIn('Heartbeat',prompts[0])
         self.assertIn('Vision',prompts[1])
-        self.assertIn('offloading',prompts[2])
+        self.assertIn('Working-memory',prompts[2])
+        self.assertIn('offloading',prompts[3])
         config = ConfigStore(self.paths).load()
         self.assertFalse(config.mandatory_offload)
         self.assertEqual(config.offload_threshold_percent,80)
@@ -244,7 +247,8 @@ class FinalReleaseCase(unittest.TestCase):
                  retrieve_when='Continue this project',reflection_complete=True),
             call('write_file',path='mind/space/resumed.txt',content='resumed'),
         )
-        agent = self.agent(engine,mandatory_offload=True,max_life_loop_rounds=4)
+        agent = self.agent(engine,mandatory_offload=True,max_life_loop_rounds=4,
+                           context_window_tokens=60000,working_memory_tokens=50000)
         self.fill_context(agent)
         agent.run_turn()
         self.assertEqual((self.paths.space/'resumed.txt').read_text(),'resumed')

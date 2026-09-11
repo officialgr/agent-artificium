@@ -67,6 +67,8 @@ def status_snapshot(paths: Paths) -> dict[str, Any]:
         "configured": config is not None, "root": str(paths.root), "process": process,
         "provider": config.provider if config else None, "model": config.model if config else None,
         "context_window_tokens": config.context_window_tokens if config else None,
+        "working_memory_tokens": config.working_memory_limit if config else None,
+        "auto_repair": config.auto_repair if config else False,
         "vision_preference": config.vision_preference if config else None,
         "effective_vision": config.vision if config else None,
         "mandatory_offload": config.mandatory_offload if config else False,
@@ -103,6 +105,7 @@ def format_status(state: dict[str, Any]) -> str:
         lines.extend([
             f"Engine: {state['provider']} / {state['model']}",
             f"Working context: ~{state['working_context_tokens']:,} tokens; configured capacity: {state['context_window_tokens']:,}",
+            f"Working-memory target: {state['working_memory_tokens']:,}; automatic repair: {'on' if state['auto_repair'] else 'off'}",
             f"Pending events: {len(state['unhandled_interactions'])}; scheduled tasks: {len(state['scheduled_tasks'])}",
             f"Vision: {state['vision_preference']} (effective: {state['effective_vision']})",
             "Mandatory offloading: " + (f"{state['offload_threshold_percent']:g}%" if state['mandatory_offload'] else "off") + ("; pending" if state['offload_pending'] else ""),

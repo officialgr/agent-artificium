@@ -92,7 +92,8 @@ class WorkingMemory:
             notice = {
                 "estimated_tokens": tokens,
                 "context_window_tokens": self.config.context_window_tokens,
-                "fraction": tokens / self.config.context_window_tokens,
+                "working_memory_tokens": self.config.working_memory_limit,
+                "fraction": tokens / self.config.working_memory_limit,
                 "milestone": bucket * step,
             }
             prior_bucket = bucket
@@ -511,7 +512,7 @@ class InfiniteAttention:
                 1_000,
                 min(
                     int(chunk_tokens),
-                    int(self.config.context_window_tokens * 0.50),
+                    int(self.config.working_memory_limit * 0.50),
                 ),
             )
         state = {

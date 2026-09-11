@@ -34,11 +34,13 @@ _UNSUPPORTED_VISION_MESSAGES = (
 
 class EngineError(RuntimeError):
     def __init__(self, message: str, *, status: int | None = None,
-                 kind: str | None = None, hint: str | None = None):
+                 kind: str | None = None, hint: str | None = None,
+                 reply: EngineReply | None = None):
         super().__init__(message)
         self.status = status
         self.kind = kind
         self.hint = hint
+        self.reply = reply
 
     @property
     def image_input_unsupported(self) -> bool:
@@ -50,7 +52,7 @@ class EngineError(RuntimeError):
         return self.status in {400, 401, 403, 404, 405, 413, 415, 422} or (
             self.status is None and self.kind in {
                 "settings", "auth", "permission", "not_found", "context",
-                "vision", "template", "tokenization", "tls",
+                "vision", "template", "tokenization", "tls", "repair",
             }
         )
 
@@ -72,7 +74,7 @@ def _server_error(detail: str, status: int | None = None) -> EngineError:
         kind, hint = "context", "The request does not fit the serving context. Increase the model server's context allocation or choose a model with more capacity; changing Artificium's number alone cannot enlarge a server."
     elif any(x in lower for x in ("failed to tokenize prompt", "number of media markers")):
         kind, hint = "tokenization", "The server rejected the prompt during tokenization. Inspect its logs and the saved request for reserved-marker collisions or malformed input; retry after correcting the request."
-    elif any(x in lower for x in (*_UNSUPPORTED_VISION_MESSAGES, "multimodal projector", "mmproj")):
+    elif any(x in lower for x in (*_UNSUPPORTED_VISION_MESSAGES, "multimodal projector", "mmproj", "invalid image", "failed to decode image", "could not decode image")):
         kind, hint = "vision", "This server cannot accept the image request. Use text-only input or load a vision-capable model and its image projector."
     elif status == 401:
         kind, hint = "auth", "The server rejected the API key. Enter the key for this endpoint."
@@ -198,6 +200,13 @@ class Engine(ABC):
     def complete(self, messages: list[dict[str, Any]]) -> EngineReply:
         raise NotImplementedError
 
+    def complete_prepared(self, prepared: PreparedRequest) -> EngineReply:
+        return self.complete(prepared.payload["messages"])
+
+    def count_input_tokens(self, prepared: PreparedRequest) -> int | None:
+        """Optional preflight count. None keeps the character-based fallback."""
+        return None
+
     def request_summary(self) -> dict[str, Any]:
         return self.prepare(
             [{"role": "user", "content": "<runtime messages omitted from preview>"}]
@@ -276,10 +285,11 @@ def _reject(config: Config, provider: str, *names: str) -> None:
 
 def _image(path_value: str, supplied_mime: str | None = None) -> tuple[str, str]:
     path = Path(path_value).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(path)
     mime = supplied_mime or mimetypes.guess_type(path.name)[0] or "image/png"
-    return mime, base64.b64encode(path.read_bytes()).decode("ascii")
+    try:
+        return mime, base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError as exc:
+        raise EngineError(f"Cannot read image {path}: {exc}", kind="vision") from exc
 
 
 def _openai_content(content: Any) -> Any:
@@ -351,6 +361,7 @@ def _materialize_openai_response_input(
 class HTTPMixin:
     config: Config
     api_key: str | None
+    request_attempts: int = 3
 
     def _redaction_secrets(self, prepared: PreparedRequest) -> list[str | None]:
         values: list[str | None] = [self.api_key]
@@ -366,7 +377,7 @@ class HTTPMixin:
             return request_json(
                 prepared.url, payload=prepared.payload,
                 headers={**prepared.headers, **self.config.headers},
-                timeout=self.config.request_timeout_seconds, attempts=3,
+                timeout=self.config.request_timeout_seconds, attempts=self.request_attempts,
                 secrets=self._redaction_secrets(prepared),
             )
         except EngineError as exc:
@@ -380,6 +391,92 @@ class JSONEngine(HTTPMixin, Engine):
     def __init__(self, config: Config, api_key: str | None):
         self.config = config
         self.api_key = api_key
+        self._count_unavailable = False
+        self._legacy_count_unavailable = False
+
+    def count_input_tokens(self, prepared: PreparedRequest) -> int | None:
+        if self._count_unavailable:
+            return self._count_legacy_llama(prepared)
+        body, adapter = prepared.payload, prepared.adapter
+        url, field = prepared.url, "input_tokens"
+        if adapter == "llamacpp":
+            url += "/input_tokens"
+            payload = body
+        elif adapter == "vllm":
+            url = self.config.base_url.removesuffix("/v1") + "/tokenize"
+            payload = {key: body[key] for key in (
+                "model", "messages", "tools", "tool_choice", "chat_template",
+                "chat_template_kwargs", "add_generation_prompt", "continue_final_message",
+                "add_special_tokens", "media_io_kwargs",
+            ) if key in body}
+            field = "count"
+        elif adapter == "openai_responses":
+            url += "/input_tokens"
+            payload = {key: body[key] for key in (
+                "model", "input", "instructions", "reasoning", "text", "tools",
+                "tool_choice", "parallel_tool_calls", "conversation",
+                "previous_response_id", "truncation",
+            ) if key in body}
+        elif adapter == "anthropic":
+            url += "/count_tokens"
+            payload = {key: body[key] for key in (
+                "model", "messages", "system", "tools", "tool_choice", "thinking",
+            ) if key in body}
+        elif adapter == "gemini":
+            url = url.removesuffix(":generateContent") + ":countTokens"
+            payload = {"generateContentRequest": {
+                **body, "model": "models/" + self.config.model.removeprefix("models/"),
+            }}
+            field = "totalTokens"
+        else:
+            return None
+        try:
+            raw = request_json(
+                url, payload=payload, headers={**prepared.headers, **self.config.headers},
+                timeout=min(10, self.config.request_timeout_seconds), attempts=1,
+                secrets=self._redaction_secrets(prepared),
+            )
+            count = raw.get(field)
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                return count
+        except EngineError as exc:
+            # A provider's input rejection is useful evidence, not a missing API.
+            if exc.kind == "context":
+                raise
+            if exc.status in {404, 405, 501}:
+                self._count_unavailable = True
+        return self._count_legacy_llama(prepared)
+
+    def _count_legacy_llama(self, prepared: PreparedRequest) -> int | None:
+        """Older llama.cpp builds: render their template, then tokenize text.
+
+        Media needs the native count endpoint; tokenizing a placeholder would
+        miss the image embeddings and produce a falsely precise count.
+        """
+        if prepared.adapter != "llamacpp" or self._legacy_count_unavailable:
+            return None
+        if any(not isinstance(item.get("content"), str) for item in prepared.payload.get("messages", [])):
+            return None
+        root = self.config.base_url.removesuffix("/v1")
+        kwargs = dict(headers={**prepared.headers, **self.config.headers},
+                      timeout=min(10, self.config.request_timeout_seconds), attempts=1,
+                      secrets=self._redaction_secrets(prepared))
+        try:
+            formatted = request_json(root + "/apply-template", payload=prepared.payload, **kwargs)
+            if not isinstance(formatted.get("prompt"), str):
+                return None
+            raw = request_json(root + "/tokenize", payload={
+                "content": formatted["prompt"], "add_special": False, "parse_special": True,
+            }, **kwargs)
+            tokens = raw.get("tokens")
+            if isinstance(tokens, list) and tokens:
+                return len(tokens)
+        except EngineError as exc:
+            if exc.kind == "context":
+                raise
+            if exc.status in {404, 405, 501}:
+                self._legacy_count_unavailable = True
+        return None
 
     def _require_key(self) -> None:
         if requires_api_key(self.config.provider, self.config.adapter) and not self.api_key:
@@ -389,8 +486,10 @@ class JSONEngine(HTTPMixin, Engine):
             )
 
     def complete(self, messages: list[dict[str, Any]]) -> EngineReply:
+        return self.complete_prepared(self.prepare(messages))
+
+    def complete_prepared(self, prepared: PreparedRequest) -> EngineReply:
         self._require_key()
-        prepared = self.prepare(messages)
         raw = self._post(prepared)
         try:
             reply = self.parse(raw)
@@ -402,10 +501,10 @@ class JSONEngine(HTTPMixin, Engine):
                               kind=exc.kind or "response", status=exc.status, hint=exc.hint) from exc
         if not reply.content.strip():
             reason = reply.finish_reason or "no finish reason"
-            hint = ("The output budget was spent on reasoning. Increase Maximum output tokens or reduce reasoning."
+            hint = ("Generation ended before a usable answer. Inspect saved usage and the server log: reasoning may have consumed the output allowance, or remaining context may have been exhausted."
                     if reply.provider_reasoning or reason in {"length", "incomplete", "max_tokens", "MAX_TOKENS"}
                     else "The model returned no usable answer. Check the model, chat template, and server log.")
-            raise EngineError(f"The model returned an empty answer ({reason}).", kind="empty", hint=hint)
+            raise EngineError(f"The model returned an empty answer ({reason}).", kind="empty", hint=hint, reply=reply)
         return reply
 
     def request_summary(self) -> dict[str, Any]:
@@ -1201,7 +1300,12 @@ class AnthropicEngine(JSONEngine):
                 converted[-1]["content"].extend(content)
             else:
                 converted.append({"role": role, "content": content})
-        max_tokens = self.config.max_output_tokens or 8192
+        # Messages requires max_tokens. Prefer the model's reported maximum when
+        # unset. Other adapters leave an unset output limit to the provider.
+        model_limit = self.config.model_capabilities.get("max_output_tokens")
+        if not isinstance(model_limit, int) or isinstance(model_limit, bool) or model_limit < 1:
+            model_limit = self.config.context_window_tokens
+        max_tokens = self.config.max_output_tokens or model_limit
         payload: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": max_tokens,

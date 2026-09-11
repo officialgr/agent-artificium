@@ -86,7 +86,9 @@ def _harness_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--heartbeat", type=_heartbeat, default=argparse.SUPPRESS)
     group.add_argument("--vision", choices=["auto", "yes", "no"], help="Image preference; checked against model capability")
     group.add_argument("--mandatory-offload", choices=["on", "off"], help="Require memory offloading at the threshold (default: off)")
-    group.add_argument("--offload-threshold", type=float, help="Estimated context percentage, 1–95 (default: 80)")
+    group.add_argument("--offload-threshold", type=float, help="Working-memory percentage, 1–95 (default: 80)")
+    group.add_argument("--working-memory-tokens", metavar="TOKENS|same", help="Offloading target; same tracks the model context (default)")
+    group.add_argument("--auto-repair", "--emergency-offload", dest="auto_repair", choices=["on", "off"], help="Try earlier context after input failures; up to 3 attempts (default: off)")
 
 
 def _connection_arguments(parser: argparse.ArgumentParser, *, runtime_settings: bool = True) -> None:
@@ -268,6 +270,8 @@ def _setup_options(args: argparse.Namespace) -> SetupOptions:
         vision=getattr(args, "vision", None),
         mandatory_offload=(getattr(args, "mandatory_offload") == "on" if getattr(args, "mandatory_offload", None) is not None else None),
         offload_threshold_percent=getattr(args, "offload_threshold", None),
+        working_memory_tokens=getattr(args, "working_memory_tokens", None),
+        auto_repair=(getattr(args, "auto_repair") == "on" if getattr(args, "auto_repair", None) is not None else None),
         force=bool(getattr(args, "force", False)),
     )
 
@@ -355,6 +359,8 @@ def _has_reconfigure_values(args: argparse.Namespace) -> bool:
             "vision",
             "mandatory_offload",
             "offload_threshold",
+            "working_memory_tokens",
+            "auto_repair",
         )
     ) or hasattr(args, "heartbeat") or bool(
         getattr(args, "reset_generation_settings", False)
@@ -377,6 +383,9 @@ def _reconfigure(paths: Paths, args: argparse.Namespace) -> None:
     )
     print(f"Vision preference: {updated.vision_preference}; mandatory offloading: "
           + (f"{updated.offload_threshold_percent:g}%" if updated.mandatory_offload else "off"))
+    print(f"Working-memory target: {updated.working_memory_limit:,} tokens"
+          + (" (same as model)" if updated.working_memory_tokens is None else "")
+          + f"; automatic repair: {'on' if updated.auto_repair else 'off'}")
     if alive and pid:
         print(
             f"Artificium is currently running as PID {pid}. Restart it to apply "
@@ -779,7 +788,12 @@ def _print_life_record(line: str) -> None:
         tokens = int(value.get("estimated_tokens", 0) or 0)
         window = int(value.get("context_window_tokens", 0) or 0)
         percent = float(value.get("context_percent", 0.0) or 0.0)
-        print(f"[context] ~{tokens:,} / {window:,} tokens ({percent:.1f}%)")
+        source = value.get("token_count_source", "estimate")
+        prefix = "~" if source == "estimate" else ""
+        print(f"[context] {prefix}{tokens:,} / {window:,} tokens ({percent:.1f}%; {source})")
+    elif kind.startswith("request_repair_"):
+        print(f"[recovery] {kind.removeprefix('request_repair_')}: "
+              f"{value.get('archive') or value.get('error') or value.get('attempts')}")
     elif kind == "guidance_notification":
         print(
             f"[guidance] {value.get('guidance_type')}: "
@@ -789,7 +803,7 @@ def _print_life_record(line: str) -> None:
         print(
             f"[engine] request {value.get('request_id')} sent to "
             f"{value.get('provider')}/{value.get('model')} "
-            f"(~{int(value.get('estimated_tokens', 0) or 0):,} input tokens)"
+            f"({int(value.get('estimated_tokens', 0) or 0):,} input tokens, {value.get('token_count_source', 'estimate')})"
         )
     elif kind == "engine_waiting":
         print(

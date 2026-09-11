@@ -9,7 +9,72 @@
 
 Artificium is designed to give an agent **full control over its own environment**, let it **work indefinitely with or without external interactions**, and **retain its experience for future retrieval**. The agent **manages its own context window**: it chooses what stays always loaded, what to offload into long-term memory, and what to retrieve or revisit. Across that continuous life-loop, it can build tools, revise its Self, and improve its own methods. The aim is to make its entire history available for learning while keeping its active context focused on the work at hand.
 
-[Quick start](#quick-start) · [Architecture and features](#architecture-and-features) · [Complete guide](#complete-guide) · [Future improvements](#future-improvements)
+[Try Artificium](#try-artificium) · [Example prompts](#example-prompts) · [Quick start](#quick-start) · [Architecture and features](#architecture-and-features) · [Complete guide](#complete-guide) · [Future improvements](#future-improvements)
+
+## Try Artificium
+
+The way I test Artificium is to give it its own cloud machine, open a chat in one browser tab, and watch its life-loop in another. This lets you see how a request turns into tool use, working notes, durable memories, and continued work.
+
+**Runpod template:** the public template link will be added here before this guide is published.
+<!-- Publication blocker: replace the preceding sentence with the verified public template link. -->
+
+The template downloads Artificium and the model, starts llama.cpp, and opens interactive setup in a browser terminal. My tested setup uses an **RTX 3090 with 24 GB VRAM**, `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL`, and a 102,400-token context. Runpod is an optional way to try it; you can also use the [quick start](#quick-start) with your own Linux environment and model service. Read the isolation guidance there before deploying.
+
+1. Deploy the template and set your own `ARTIFICIUM_WEB_PASSWORD`. Expose HTTP ports **7860** for the terminal and **7861** for the web-chat example below.
+2. Open the Pod's **Connect → HTTP port 7860** link. Sign in as **`artificium`** with the password you set. The terminal shows download/loading progress, then opens setup when the model is ready. The first model download takes time; subsequent starts reuse the cache on `/workspace`.
+3. Complete setup and choose terminal chat. Open the same terminal link in another tab and choose the life-loop viewer, or run `python3 artificium.py watch` from the project folder. Both views use the same running agent.
+4. Give it a concrete objective, then watch what it does. The prompts below are two starting points.
+
+Closing a chat or viewer leaves the agent running. Run `python3 artificium.py stop` to stop the agent. Stop or terminate the Pod separately in Runpod when you finish using its GPU.
+
+<details>
+<summary><strong>My model settings</strong></summary>
+
+For this Qwen setup, I use **temperature 0.3** and **reasoning effort low**. These are preferences from my tests; try different settings for other models.
+
+To set temperature from the Artificium project folder:
+
+```bash
+python3 artificium.py configure model --temperature 0.3 --yes && python3 artificium.py restart
+```
+
+This verifies the connection, saves a per-request temperature override, and restarts the agent to apply it. Other saved generation settings are preserved. The same command is available across Artificium's adapters; the selected model/API must support adjustable temperature. Run it before starting a long experiment.
+
+</details>
+
+## Example prompts
+
+### Build a web chat UI
+
+Paste this into Artificium's terminal chat. The agent builds a browser interface connected to its existing interactions and memory. On Runpod, expose **HTTP port 7861 before deploying** so the finished app has a route to your browser; the terminal continues using 7860. [Runpod's port guide](https://docs.runpod.io/pods/configuration/expose-ports) explains the proxy URLs.
+
+```text
+Build and launch a clean web chat interface where I can continue this conversation with you in my browser.
+
+Inspect this Artificium instance and its interaction client first. Connect the UI to this running agent through ArtificiumClient, using my current identity and conversation. Load our real message history and append new messages through the client so chat in the terminal and browser stays in sync. Let the existing life-loop produce your replies.
+
+Choose a simple implementation and a readable design with a message composer, conversation history, and a clear waiting state. Persist messages across page refreshes. Submit messages promptly and poll for replies so a long inference does not keep an HTTP request open. Render message content safely.
+
+On this Runpod setup, serve on 0.0.0.0:7861 and use RUNPOD_POD_ID to determine the HTTPS proxy URL. Protect the page and message API with the existing ARTIFICIUM_WEB_PASSWORD, checked on the server, and the username artificium. Keep the password out of source files, browser code, and logs. If you are running elsewhere, inspect the available browser-accessible route; ask me only if external port exposure requires my action.
+
+Keep the service running independently of this terminal and save its source, logs, and restart instructions. Verify the page loads and a submitted message reaches this conversation. Then send me the browser URL here, describe anything you could not verify, and save how to maintain the UI in your memory.
+```
+
+### Work autonomously on a standing research goal
+
+This is a long-running research demonstration: watch the approaches, checks, tools, and memories it produces. Replace the objective with a project of your own if you prefer.
+
+```text
+Adopt the following standing research goal: work toward a rigorous proof of the Riemann hypothesis, that every nontrivial zero of the Riemann zeta function has real part 1/2.
+
+Work autonomously across many cycles. Begin by mapping the problem, relevant established results, and plausible approaches. Choose a tractable next question, work on it, check the result, and decide what to try next. Do not wait for another message from me between ordinary research steps. You may build reusable tools, write programs, run numerical experiments, and develop supporting lemmas.
+
+Keep established facts, conjectures, experimental evidence, and proved claims clearly distinguished. Verify the sources you rely on. Challenge your own arguments, look for counterexamples and circular reasoning, and record the precise gap whenever an approach fails. Numerical agreement alone does not establish a proof.
+
+Maintain a research notebook with derivations, reproducible experiments, failed approaches, and your current best next step. Save useful knowledge and tools in durable memory, keep an index, and use working-memory offloading to continue beyond one context window. After offloading, resume from those records rather than starting over.
+
+Continue until you have a complete argument ready for independent expert scrutiny, I ask you to stop, or a concrete blocker prevents further useful work. Send occasional concise progress updates with links to artifacts, explain blockers precisely, and only claim a proof when every necessary step is justified. Start now.
+```
 
 ## Quick start
 

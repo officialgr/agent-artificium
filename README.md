@@ -56,6 +56,54 @@ python3 artificium.py stop
 
 Supported connections: **llama.cpp, Ollama, vLLM, OpenRouter, OpenAI Responses, Gemini, Anthropic, OpenAI-compatible servers, and custom JSON APIs**. Local inference and custom setup are covered in the complete guide below.
 
+<details>
+<summary><strong>Try Artificium on Runpod — setup and example prompts</strong></summary>
+
+I usually chat with Artificium in one browser tab and keep its life-loop open in another.
+
+**[Open the Runpod template](https://console.runpod.io/hub/template/x4bydgdt2h?ref=8knnycbq)**
+
+The template downloads Artificium and the model, starts llama.cpp, and opens interactive setup in a browser terminal.
+
+I recommend using an **RTX 3090 with 24 GB VRAM** and **Qwen3.8-27B UD-Q4_K_XL**. This is the configuration I use most often.
+
+### Getting started
+
+1. Before deploying, change the `ARTIFICIUM_WEB_PASSWORD` environment variable to a **strong, unique password**.
+2. Open the Pod's **Connect → HTTP port 7860** link. Sign in with username **`artificium`** and your chosen password.
+3. Wait for the model to download and load, then complete Artificium's interactive setup.
+4. Choose terminal chat. Open the same terminal link in another tab to watch the life-loop. From the project folder, you can also run:
+
+   ```bash
+   python3 artificium.py watch
+   ```
+
+HTTP port **7861** is free for the agent to use. You can expose more HTTP ports if needed.
+
+I **strongly recommend setting the temperature to 0.3** for this **Qwen3.8-27B configuration**. If you forgot to change it during Artificium's setup, you can easily change it afterward by running this from the project folder:
+
+```bash
+python3 artificium.py configure model --temperature 0.3 --yes && python3 artificium.py restart
+```
+
+Closing the browser tabs leaves Artificium running. Use `python3 artificium.py stop` to stop the agent, and stop the Pod separately in Runpod when you finish using its GPU.
+
+### Example: give it a task
+
+```text
+Build me a web chat UI where I can talk to you, and send me a link I can open in my browser.
+```
+
+### Example: give it a long-term purpose
+
+Ask Artificium to update its Self with an ongoing goal:
+
+```text
+Change your Self so your life purpose is to solve the Riemann hypothesis. Keep working on it autonomously until you solve it.
+```
+
+</details>
+
 ## Architecture and features
 
 Each instance has **one model connection, one active inference loop, and one shared mind**. The runtime supplies context and executes tools; the model decides what to inspect, remember, build, pursue, or defer.

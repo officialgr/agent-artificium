@@ -46,6 +46,10 @@ class Notification:
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self) | {"queue_path": None}
 
+    @property
+    def is_runtime_notice(self) -> bool:
+        return self.source == "artificium_runtime" and self.type in {"wake", "recovery"}
+
 class NotificationStore:
     def __init__(self, paths: Paths, records: Records):
         self.paths = paths
@@ -78,19 +82,36 @@ class NotificationStore:
     def has_new(self) -> bool:
         return any(self.paths.notifications_new.glob("*.json"))
 
-    def claim(self, limit: int) -> list[Notification]:
+    def claim(self, limit: int, *, include_runtime_notices: bool = False) -> list[Notification]:
+        """Claim a normal batch, optionally including all internal wake/recovery notices.
+
+        The runtime renders those notices as one bounded summary. Their original
+        queue files still follow the usual release/commit transaction.
+        """
         claimed: list[Notification] = []
-        for source in sorted(self.paths.notifications_new.glob("*.json"))[:limit]:
+        if limit <= 0:
+            return claimed
+        ordinary_count = 0
+        for source in sorted(self.paths.notifications_new.glob("*.json")):
+            if ordinary_count >= limit and not include_runtime_notices:
+                break
+            value = read_json(source)
+            item = Notification.from_dict(value, source) if isinstance(value, dict) else None
+            extra_notice = include_runtime_notices and item is not None and item.is_runtime_notice
+            if ordinary_count >= limit and not extra_notice:
+                continue
             destination = self.paths.notifications_processing / source.name
             try:
                 source.replace(destination)
             except FileNotFoundError:
                 continue
-            value = read_json(destination)
-            if isinstance(value, dict):
-                claimed.append(Notification.from_dict(value, destination))
+            if item is not None:
+                item.queue_path = destination
+                claimed.append(item)
             else:
                 destination.replace(self.paths.notifications_delivered / destination.name)
+            if not extra_notice:
+                ordinary_count += 1
         return claimed
 
     def commit(self, item: Notification) -> None:

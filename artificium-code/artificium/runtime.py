@@ -636,9 +636,12 @@ class Artificium:
                 timed_sleep_interrupted=metadata.get("timed_sleep_interrupted", False),
             )
         if item.type == "recovery":
+            reason = metadata.get("reason", item.summary)
+            if metadata.get("failed_attempts"):
+                reason = f"{metadata['failed_attempts']} failed attempts; latest error: {reason}"
             return self.prompts.event(
                 "recovery",
-                recovery_reason=metadata.get("reason", item.summary),
+                recovery_reason=reason,
                 last_confirmed_action_or_none=metadata.get("last_confirmed_action") or "none",
                 uncertain_action_or_none=metadata.get("uncertain_action") or "none",
                 last_checkpoint_or_none=self._last_checkpoint(),
@@ -668,7 +671,51 @@ class Artificium:
 
     def _claim_notifications(self) -> list[Notification]:
         self.interactions.reconcile()
-        return self.notifications.claim(self.config.notification_batch_size)
+        return self.notifications.claim(
+            self.config.notification_batch_size, include_runtime_notices=True
+        )
+
+    def _render_notifications(self, claimed: list[Notification]) -> list[str]:
+        notices = [item for item in claimed if item.is_runtime_notice]
+        if len(notices) < 2:
+            return [self._render_notification(item) for item in claimed]
+        ordered = sorted(notices, key=lambda item: (item.created_at, item.id))
+        latest = {item.type: item for item in ordered}
+        summary = self.prompts.event(
+            "runtime_notice_summary",
+            notice_count=len(notices),
+            wake_count=sum(item.type == "wake" for item in notices),
+            recovery_count=sum(item.type == "recovery" for item in notices),
+            first_notice_at=ordered[0].created_at,
+            last_notice_at=ordered[-1].created_at,
+            latest_wake=self._render_notification(latest["wake"]) if "wake" in latest else "none",
+            latest_recovery=self._render_notification(latest["recovery"]) if "recovery" in latest else "none",
+            notice_archive_path=str(self.paths.notifications_delivered),
+        )
+        rendered: list[str] = []
+        summary_added = False
+        for item in claimed:
+            if item.is_runtime_notice:
+                if not summary_added:
+                    rendered.append(summary)
+                    summary_added = True
+            else:
+                rendered.append(self._render_notification(item))
+        return rendered
+
+    def _pending_recovery(self) -> dict[str, Any] | None:
+        state = read_json(self.paths.sleep_state, {})
+        recovery = state.get("recovery")
+        return recovery if not state.get("active") and isinstance(recovery, dict) else None
+
+    def _acknowledge_recovery(self, recovery: dict[str, Any] | None) -> None:
+        if recovery is None:
+            return
+        state = read_json(self.paths.sleep_state, {})
+        if state.get("recovery") == recovery:
+            state.pop("recovery")
+            state["recovered_at"] = utc_now()
+            atomic_write_json(self.paths.sleep_state, state)
 
     def _mandatory_offload_required(self, estimated: int) -> bool:
         if not self.config.mandatory_offload:
@@ -788,6 +835,15 @@ class Artificium:
         state = read_json(self.paths.sleep_state, {})
         if not isinstance(state, dict) or not state.get("active"):
             return False
+        if state.get("reason") == "engine_error_backoff":
+            # Unconsumed messages must not wake their own failed request. Keep
+            # one durable recovery record until a later inference accepts it.
+            if time.time() < float(state.get("wake_at_epoch", 0)):
+                return True
+            state.update(active=False, woke_at=utc_now())
+            atomic_write_json(self.paths.sleep_state, state)
+            self.records.emit("sleep_ended", reason="engine_retry_timer")
+            return False
         reason: str | None = None
         interrupted = False
         if self.notifications.has_new():
@@ -811,14 +867,6 @@ class Artificium:
                 "timed_sleep_interrupted": interrupted,
             },
         )
-        recovery = state.get("recovery")
-        if isinstance(recovery, dict):
-            self.notifications.create(
-                type="recovery",
-                source="artificium_runtime",
-                summary="The life-loop is resuming after an engine or runtime failure.",
-                metadata=recovery,
-            )
         return False
 
     def _observe_no_action(self, content: str) -> tuple[int, bool]:
@@ -859,7 +907,16 @@ class Artificium:
                 continuation_reason = "turn time limit"
                 break
             claimed = self._claim_notifications()
-            inputs = [self._render_notification(item) for item in claimed]
+            inputs = self._render_notifications(claimed)
+            recovery = self._pending_recovery()
+            if recovery is not None:
+                inputs.insert(0, self._render_notification(Notification(
+                    id="engine_recovery",
+                    created_at=str(recovery.get("last_failed_at") or utc_now()),
+                    type="recovery", source="artificium_runtime", path=None,
+                    summary="Retrying after earlier provider or runtime failures.",
+                    metadata=recovery,
+                )))
             inputs.extend(self._context_events())
             if not meta_memory_guidance_issued:
                 guidance = self._meta_memory_guidance(turn_id=turn_id)
@@ -940,6 +997,7 @@ class Artificium:
                 )
                 break
             self._append_runtime(inputs, origin="life_loop_input")
+            self._acknowledge_recovery(recovery)
             for item in claimed:
                 self.notifications.commit(item)
 
@@ -1295,10 +1353,13 @@ class Artificium:
                 "python3 artificium.py restart",
             )
             return
-        seconds = min(
-            self.config.engine_error_backoff_seconds * (2 ** max(0, repeats - 1)),
-            900.0,
-        )
+        seconds = min(self.config.engine_error_backoff_seconds, 900.0)
+        for _ in range(max(0, repeats - 1)):
+            seconds = min(seconds * 2, 900.0)
+            if seconds >= 900.0:
+                break
+        previous = read_json(self.paths.sleep_state, {}).get("recovery") or {}
+        failed_at = utc_now()
         atomic_write_json(
             self.paths.sleep_state,
             {
@@ -1310,6 +1371,9 @@ class Artificium:
                 "reason": "engine_error_backoff",
                 "recovery": {
                     "reason": f"{type(exc).__name__}: {exc}",
+                    "failed_attempts": int(previous.get("failed_attempts", 0)) + 1,
+                    "first_failed_at": previous.get("first_failed_at") or failed_at,
+                    "last_failed_at": failed_at,
                     "paths": [str(self.paths.lifetime_log), str(self.paths.model_log)],
                 },
             },
@@ -1404,15 +1468,18 @@ class Artificium:
                         continue
                     now = time.monotonic()
                     event_ready = self.notifications.has_new()
+                    retry_ready = self._pending_recovery() is not None
                     heartbeat_ready = (
                         self.config.heartbeat_seconds is not None and now >= next_heartbeat
                     )
-                    if not initial_pulse and not event_ready and not heartbeat_ready:
+                    if not initial_pulse and not event_ready and not heartbeat_ready and not retry_ready:
                         time.sleep(self.config.poll_seconds)
                         continue
                     trigger = (
                         "startup"
                         if initial_pulse
+                        else "engine_retry"
+                        if retry_ready
                         else "notification"
                         if event_ready
                         else "heartbeat"

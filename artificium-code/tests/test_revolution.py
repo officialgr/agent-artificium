@@ -529,6 +529,167 @@ class RevolutionCase(unittest.TestCase):
                 self.assertFalse(agent._request_blocked)
                 self.assertEqual(read_json(self.paths.sleep_state, {})["reason"], "engine_error_backoff")
 
+    def test_engine_backoff_is_not_interrupted_by_queued_or_new_messages(self) -> None:
+        agent = Artificium(self.paths, engine=FakeEngine([]), console=Console(quiet=True))
+        agent.notifications.create(type="external_event", source="test", summary="Original message")
+        with mock.patch("artificium.runtime.time.time", return_value=100):
+            agent._error_sleep(EngineError("overloaded", status=503), 1)
+            self.assertTrue(agent._sleep_active())
+        agent.notifications.create(type="external_event", source="test", summary="New message")
+        with mock.patch("artificium.runtime.time.time", return_value=159):
+            self.assertTrue(agent._sleep_active())
+        with mock.patch("artificium.runtime.time.time", return_value=160):
+            self.assertFalse(agent._sleep_active())
+        queued = [read_json(p) for p in self.paths.notifications_new.glob("*.json")]
+        self.assertEqual({n["summary"] for n in queued}, {"Original message", "New message"})
+        self.assertEqual(agent._pending_recovery()["failed_attempts"], 1)
+
+    def test_long_failure_streak_keeps_capped_backoff(self) -> None:
+        agent = Artificium(self.paths, engine=FakeEngine([]), console=Console(quiet=True))
+        agent._error_sleep(EngineError("still overloaded", status=503), 10_000)
+        self.assertEqual(read_json(self.paths.sleep_state)["seconds"], 900)
+        self.assertFalse(agent.notifications.has_new())
+
+    def test_transient_retries_preserve_messages_and_commit_one_recovery_after_restart(self) -> None:
+        errors = [EngineError("overloaded", status=503), EngineError("rate limited", status=429),
+                  EngineError("connection failed", kind="network")]
+
+        class RecoveringEngine(Engine):
+            def complete(self, messages: list[dict]) -> EngineReply:
+                if errors:
+                    raise errors.pop(0)
+                return EngineReply("<think>Recovered.</think>")
+
+        engine = RecoveringEngine()
+        agent = Artificium(self.paths, engine=engine, console=Console(quiet=True))
+        agent.initialization.finish("Already initialized for this test.")
+        agent.working.append({"role": "user", "content": "Keep this history."}, origin="test")
+        before = self.paths.working_context.read_bytes()
+        agent.notifications.create(type="external_event", source="test", summary="Queued work")
+        for attempt in range(1, 4):
+            with self.assertRaises(EngineError) as caught:
+                agent.run_once(trigger="test-retry")
+            agent._error_sleep(caught.exception, attempt)
+            deadline = read_json(self.paths.sleep_state)["wake_at_epoch"]
+            with mock.patch("artificium.runtime.time.time", return_value=deadline):
+                self.assertFalse(agent._sleep_active())
+            self.assertEqual(agent._pending_recovery()["failed_attempts"], attempt)
+            self.assertEqual(self.paths.working_context.read_bytes(), before)
+            self.assertEqual(len(list(self.paths.notifications_new.glob("*.json"))), 1)
+            self.assertFalse(list(self.paths.notifications_processing.glob("*.json")))
+
+        restarted = Artificium(self.paths, engine=engine, console=Console(quiet=True))
+        self.assertEqual(restarted._pending_recovery()["failed_attempts"], 3)
+        restarted.run_once(trigger="retry-after-restart")
+        self.assertIsNone(restarted._pending_recovery())
+        self.assertFalse(restarted.notifications.has_new())
+        history = self.paths.working_context.read_text()
+        self.assertIn("Keep this history.", history)
+        self.assertIn("Queued work", history)
+        self.assertIn("connection failed", history)
+        self.assertIn("3 failed attempts", history)
+        self.assertEqual(history.count("SYSTEM NOTIFICATION — RECOVERY"), 1)
+        restarted.run_once(trigger="later-turn")
+        self.assertEqual(self.paths.working_context.read_text().count("SYSTEM NOTIFICATION — RECOVERY"), 1)
+
+    def test_retry_timer_runs_without_heartbeat_or_notifications(self) -> None:
+        agent = Artificium(self.paths, engine=FakeEngine([]), console=Console(quiet=True))
+        agent.config.heartbeat_seconds = None
+        clock = [100.0]
+        attempts: list[tuple[float, str]] = []
+
+        def turn(*, trigger: str) -> str:
+            attempts.append((clock[0], trigger))
+            if len(attempts) == 1:
+                raise EngineError("overloaded", status=503)
+            agent._stop = True
+            return "Recovered"
+
+        def advance(seconds: float) -> None:
+            clock[0] += seconds
+            self.assertLessEqual(clock[0], 160, "Retry never became runnable")
+
+        with mock.patch.object(agent, "run_turn", side_effect=turn), \
+             mock.patch("artificium.runtime.time.time", side_effect=lambda: clock[0]), \
+             mock.patch("artificium.runtime.time.sleep", side_effect=advance):
+            agent.run_forever(quiet=True)
+        self.assertEqual(attempts, [(100.0, "startup"), (160.0, "engine_retry")])
+        self.assertFalse(agent.notifications.has_new())
+
+    def test_legacy_notice_backlog_is_bounded_and_archived_only_after_success(self) -> None:
+        class RejectOnce(FakeEngine):
+            def complete(self, messages: list[dict]) -> EngineReply:
+                if not self.requests:
+                    self.requests.append(messages)
+                    raise EngineError("temporary failure", status=503)
+                return super().complete(messages)
+
+        engine = RejectOnce(["<think>Messages received.</think>"])
+        agent = Artificium(self.paths, engine=engine, console=Console(quiet=True))
+        agent.initialization.finish("Already initialized for this test.")
+        agent.config.notification_batch_size = 2
+        originals: dict[str, bytes] = {}
+        for i in range(64):
+            for kind in ("wake", "recovery"):
+                n = agent.notifications.create(type=kind, source="artificium_runtime",
+                    summary="Earlier retry", metadata={"reason": f"Earlier failure {i}"})
+                originals[n.queue_path.name] = n.queue_path.read_bytes()
+        # A recovery event from an external source must remain an ordinary event.
+        external = agent.notifications.create(type="recovery", source="external-client",
+            summary="Client recovery", metadata={"reason": "Preserve this client recovery exactly"})
+        first = agent.notifications.create(type="external_event", source="test", summary="First user message")
+        second = agent.notifications.create(type="external_event", source="test", summary="Second user message")
+        for n in (external, first):
+            originals[n.queue_path.name] = n.queue_path.read_bytes()
+        before = self.paths.working_context.read_bytes()
+
+        with self.assertRaises(EngineError):
+            agent.run_once(trigger="legacy-backlog")
+        self.assertEqual(len(list(self.paths.notifications_new.glob("*.json"))), 131)
+        self.assertFalse(list(self.paths.notifications_processing.glob("*.json")))
+        self.assertFalse(list(self.paths.notifications_delivered.glob("*.json")))
+        self.assertEqual(self.paths.working_context.read_bytes(), before)
+        batch = engine.requests[0][-1]["content"]
+        self.assertIn("Consolidated 128 internal notices", batch)
+        self.assertIn("Earlier failure 63", batch)
+        self.assertIn("Preserve this client recovery exactly", batch)
+        self.assertIn("First user message", batch)
+        self.assertNotIn("Second user message", batch)
+        self.assertLess(len(batch), 6_000)
+
+        agent.run_once(trigger="legacy-backlog-retry")
+        self.assertEqual([p.name for p in self.paths.notifications_new.glob("*.json")],
+                         [second.queue_path.name])
+        for name, content in originals.items():
+            self.assertEqual((self.paths.notifications_delivered / name).read_bytes(), content)
+        self.assertEqual(self.paths.working_context.read_text().count("EARLIER RUNTIME NOTICES"), 1)
+
+    def test_ordinary_sleep_still_wakes_for_a_new_message(self) -> None:
+        agent = Artificium(self.paths, engine=FakeEngine([]), console=Console(quiet=True))
+        atomic_write_json(self.paths.sleep_state, {"active": True, "mode": "until_event",
+                                                  "started_at": "test"})
+        self.assertTrue(agent._sleep_active())
+        agent.notifications.create(type="external_event", source="test", summary="Wake up")
+        self.assertFalse(agent._sleep_active())
+        kinds = sorted(read_json(p)["type"] for p in self.paths.notifications_new.glob("*.json"))
+        self.assertEqual(kinds, ["external_event", "wake"])
+
+    def test_stop_at_provider_boundary_keeps_recovery_and_messages_pending(self) -> None:
+        class StopAfterReply(Engine):
+            def complete(self, messages: list[dict]) -> EngineReply:
+                agent._stop = True
+                return EngineReply("<think>Accepted.</think>")
+
+        agent = Artificium(self.paths, engine=StopAfterReply(), console=Console(quiet=True))
+        agent.notifications.create(type="external_event", source="test", summary="Keep queued")
+        agent._error_sleep(EngineError("overloaded", status=503), 1)
+        with mock.patch("artificium.runtime.time.time", return_value=read_json(self.paths.sleep_state)["wake_at_epoch"]):
+            self.assertFalse(agent._sleep_active())
+        agent.run_once(trigger="interrupted-recovery")
+        self.assertIsNotNone(agent._pending_recovery())
+        self.assertTrue(agent.notifications.has_new())
+        self.assertFalse(agent.working.load())
+
     def test_watch_and_status_explain_paused_requests(self) -> None:
         from artificium.operator import format_status, status_snapshot
         agent = Artificium(self.paths, engine=FakeEngine([]), console=Console(quiet=True))

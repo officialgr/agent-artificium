@@ -4,6 +4,7 @@ import base64
 import copy
 import json
 import mimetypes
+import re
 import socket
 import ssl
 import time
@@ -22,6 +23,15 @@ from .filesystem import json_dumps
 DEFAULT_USER_AGENT = "Artificium-revolution/1.9.3"
 
 
+_UNSUPPORTED_VISION_MESSAGES = (
+    "does not support image", "images are not supported",
+    "image input is not supported", "image input is unsupported",
+    "vision is not supported", "does not support vision",
+    "does not support multimodal", "multimodal is not supported",
+    "multimodal support is not enabled", "image_url is not supported",
+)
+
+
 class EngineError(RuntimeError):
     def __init__(self, message: str, *, status: int | None = None,
                  kind: str | None = None, hint: str | None = None):
@@ -29,6 +39,20 @@ class EngineError(RuntimeError):
         self.status = status
         self.kind = kind
         self.hint = hint
+
+    @property
+    def image_input_unsupported(self) -> bool:
+        return any(text in str(self).lower() for text in _UNSUPPORTED_VISION_MESSAGES)
+
+    @property
+    def requires_operator_action(self) -> bool:
+        # Rejected requests need correction; waiting cannot repair their contents.
+        return self.status in {400, 401, 403, 404, 405, 413, 415, 422} or (
+            self.status is None and self.kind in {
+                "settings", "auth", "permission", "not_found", "context",
+                "vision", "template", "tokenization", "tls",
+            }
+        )
 
 
 def _server_error(detail: str, status: int | None = None) -> EngineError:
@@ -46,7 +70,9 @@ def _server_error(detail: str, status: int | None = None) -> EngineError:
     kind, hint = "server", "Check the model server's error above, then retry."
     if any(x in lower for x in ("context length", "context size", "context window", "n_ctx", "too many tokens", "prompt is too long", "exceed_context_size")):
         kind, hint = "context", "The request does not fit the serving context. Increase the model server's context allocation or choose a model with more capacity; changing Artificium's number alone cannot enlarge a server."
-    elif any(x in lower for x in ("does not support image", "images are not supported", "image input is not supported", "vision is not supported", "does not support vision", "multimodal is not supported", "does not support multimodal", "multimodal support is not enabled", "multimodal projector", "mmproj", "image_url is not supported")):
+    elif any(x in lower for x in ("failed to tokenize prompt", "number of media markers")):
+        kind, hint = "tokenization", "The server rejected the prompt during tokenization. Inspect its logs and the saved request for reserved-marker collisions or malformed input; retry after correcting the request."
+    elif any(x in lower for x in (*_UNSUPPORTED_VISION_MESSAGES, "multimodal projector", "mmproj")):
         kind, hint = "vision", "This server cannot accept the image request. Use text-only input or load a vision-capable model and its image projector."
     elif status == 401:
         kind, hint = "auth", "The server rejected the API key. Enter the key for this endpoint."
@@ -475,6 +501,36 @@ class OpenAICompatibleEngine(JSONEngine):
         return _chat_response(raw)
 
 
+_LLAMACPP_MEDIA_MARKER = re.compile(r"<__media(?:_[A-Za-z0-9]+)?__>")
+
+
+def _llamacpp_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Quote literal media markers in text, preserving history and image parts.
+
+    llama.cpp inserts its own markers for real image inputs. A marker copied
+    from /props or logs into ordinary text must not consume another bitmap.
+    This covers the generated marker format and the legacy <__media__> form.
+    """
+    def escape(text: str) -> str:
+        return _LLAMACPP_MEDIA_MARKER.sub(
+            lambda match: "&lt;" + match.group(0)[1:-1] + "&gt;", text
+        )
+
+    rendered = materialize_openai_messages(messages)
+    for message in rendered:
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = escape(content)
+        elif isinstance(content, list):
+            for part in content:
+                if part.get("type") == "text" and isinstance(part.get("text"), str):
+                    part["text"] = escape(part["text"])
+        for key in ("reasoning_content", "reasoning"):
+            if isinstance(message.get(key), str):
+                message[key] = escape(message[key])
+    return rendered
+
+
 class LlamaCppEngine(OpenAICompatibleEngine):
     """llama-server Chat Completions, with its native sampling field names.
 
@@ -486,7 +542,7 @@ class LlamaCppEngine(OpenAICompatibleEngine):
         _reject(self.config, "llama.cpp", "reasoning_budget_tokens", "reasoning_mode")
         payload: dict[str, Any] = {
             "model": self.config.model,
-            "messages": materialize_openai_messages(messages),
+            "messages": _llamacpp_messages(messages),
             "stream": False,
             **_chat_common(self.config),
         }

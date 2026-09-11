@@ -123,6 +123,7 @@ class Artificium:
                 self.tools._save_control(control)
         self._key_signature = self._secret_signature()
         self._stop = False
+        self._request_blocked = False
 
     def _secret_signature(self) -> tuple[int, int] | None:
         try:
@@ -491,6 +492,9 @@ class Artificium:
                 request_id=request_id,
                 duration_seconds=round(elapsed, 3),
                 error=f"{type(exc).__name__}: {exc}",
+                hint=exc.hint,
+                http_status=exc.status,
+                error_kind=exc.kind,
                 model_log_path=str(request_log_path),
             )
             self.console.error(
@@ -501,6 +505,7 @@ class Artificium:
                 self.config.vision == "auto"
                 and self._contains_image(messages)
                 and exc.status in {400, 413, 415, 422}
+                and exc.image_input_unsupported
                 and self._downgrade_context_images(str(exc))
             ):
                 return self._complete(
@@ -1271,6 +1276,25 @@ class Artificium:
         return self.run_turn(trigger=trigger)
 
     def _error_sleep(self, exc: Exception, repeats: int) -> None:
+        if isinstance(exc, EngineError) and exc.requires_operator_action:
+            self._request_blocked = True
+            detail = {
+                "error": str(exc),
+                "hint": exc.hint,
+                "http_status": exc.status,
+                "error_kind": exc.kind,
+                "recovery_command": "python3 artificium.py restart",
+            }
+            self._write_state("blocked", **detail)
+            self.records.life("engine_blocked", **detail)
+            self.records.emit("engine_blocked", **detail)
+            self.console.line(
+                "engine",
+                "Model requests paused; history and incoming messages are retained. "
+                "Correct the reported request or connection problem, then run: "
+                "python3 artificium.py restart",
+            )
+            return
         seconds = min(
             self.config.engine_error_backoff_seconds * (2 ** max(0, repeats - 1)),
             900.0,
@@ -1296,6 +1320,7 @@ class Artificium:
         self.console.verbose = verbose
         self.console.quiet = quiet
         self._stop = False
+        self._request_blocked = False
 
         interrupt_count = 0
 
@@ -1371,6 +1396,9 @@ class Artificium:
                 while not self._stop:
                     self._refresh_key()
                     self.interactions.reconcile()
+                    if self._request_blocked:
+                        time.sleep(self.config.poll_seconds)
+                        continue
                     if self._sleep_active():
                         time.sleep(self.config.poll_seconds)
                         continue

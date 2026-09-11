@@ -446,6 +446,109 @@ class RevolutionCase(unittest.TestCase):
             json.dumps(engine.requests[0]).count('"type": "artificium_image"'), 1
         )
 
+    def test_unrelated_rejection_preserves_images_and_does_not_retry(self) -> None:
+        image = self.root / "keep.png"
+        image.write_bytes(b"retained-image")
+
+        class RejectText(Engine):
+            calls = 0
+
+            def complete(self, messages: list[dict]) -> EngineReply:
+                self.calls += 1
+                raise EngineError("HTTP 400: Failed to tokenize prompt", status=400)
+
+        engine = RejectText()
+        agent = Artificium(self.paths, engine=engine, console=Console(quiet=True))
+        agent.visual.load([str(image)], retention="once")
+        before = agent.visual.list()
+        with self.assertRaisesRegex(EngineError, "Failed to tokenize"):
+            agent.run_once(trigger="text-rejection-with-image")
+        self.assertEqual(engine.calls, 1)
+        self.assertEqual(agent.visual.list(), before)
+        self.assertFalse(any(item["kind"] == "images_downgraded"
+                             for item in agent.records.recent_operational(200)))
+
+    def test_rejected_request_pauses_inference_while_new_messages_are_retained(self) -> None:
+        class RejectText(Engine):
+            calls = 0
+
+            def complete(self, messages: list[dict]) -> EngineReply:
+                self.calls += 1
+                raise EngineError("HTTP 400: Failed to tokenize prompt", status=400,
+                                  kind="tokenization", hint="Inspect the request.")
+
+        engine = RejectText()
+        agent = Artificium(self.paths, engine=engine, console=Console(quiet=True))
+        agent.working.append({"role": "user", "content": "Preserve this history."}, origin="test")
+        history = self.paths.working_context.read_bytes()
+        polls = 0
+
+        def observe_pause(_seconds: float) -> None:
+            nonlocal polls
+            polls += 1
+            self.assertEqual(engine.calls, 1)
+            self.assertTrue(agent._request_blocked)
+            state = read_json(self.paths.runtime_state, {})
+            self.assertEqual(state["status"], "blocked")
+            self.assertIn("Failed to tokenize prompt", state["error"])
+            if polls == 1:
+                agent.notifications.create(type="external_event", source="test", summary="New message while paused")
+            if polls == 3:
+                agent._stop = True
+
+        with mock.patch("artificium.runtime.time.sleep", side_effect=observe_pause):
+            agent.run_forever(quiet=True)
+        self.assertEqual(polls, 3)
+        self.assertEqual(engine.calls, 1)
+        self.assertEqual(self.paths.working_context.read_bytes(), history)
+        self.assertTrue(agent.notifications.has_new())
+        blocked = [item for item in agent.records.recent_life(200) if item["kind"] == "engine_blocked"]
+        self.assertEqual(len(blocked), 1)
+
+        class Recovered(Engine):
+            calls = 0
+
+            def complete(self, messages: list[dict]) -> EngineReply:
+                self.calls += 1
+                agent._stop = True
+                return EngineReply("Recovered.")
+
+        recovered = Recovered()
+        agent.engine = recovered
+        agent.run_forever(quiet=True)
+        self.assertEqual(recovered.calls, 1)
+        self.assertFalse(agent._request_blocked)
+
+    def test_transient_errors_keep_the_existing_backoff_path(self) -> None:
+        agent = Artificium(self.paths, engine=FakeEngine([]), console=Console(quiet=True))
+        for error in (EngineError("overloaded", status=503),
+                      EngineError("rate limited", status=429),
+                      EngineError("connection failed", kind="network")):
+            with self.subTest(error=str(error)):
+                agent._error_sleep(error, 1)
+                self.assertFalse(agent._request_blocked)
+                self.assertEqual(read_json(self.paths.sleep_state, {})["reason"], "engine_error_backoff")
+
+    def test_watch_and_status_explain_paused_requests(self) -> None:
+        from artificium.operator import format_status, status_snapshot
+        agent = Artificium(self.paths, engine=FakeEngine([]), console=Console(quiet=True))
+        agent._error_sleep(EngineError("HTTP 400: bad request", status=400), 1)
+        state = status_snapshot(self.paths)
+        state["process"].update(alive=True, owned=True, pid=123)
+        self.assertIn("model requests paused", format_status(state))
+        self.assertIn("HTTP 400: bad request", format_status(state))
+        watched = io.StringIO()
+        with redirect_stdout(watched):
+            _print_life_record(json.dumps({
+                "kind": "engine_request_failed", "request_id": "test", "duration_seconds": 0,
+                "error": "HTTP 400: Failed to tokenize prompt", "hint": "Inspect the request.",
+                "model_log_path": "test.json",
+            }))
+            _print_life_record(json.dumps({"kind": "engine_blocked"}))
+        self.assertIn("Failed to tokenize prompt", watched.getvalue())
+        self.assertIn("Inspect the request.", watched.getvalue())
+        self.assertIn("python3 artificium.py restart", watched.getvalue())
+
     def test_vision_rejection_releases_images_and_retries_without_them(self) -> None:
         image = self.root / "unsupported.png"
         image.write_bytes(b"unsupported-image")

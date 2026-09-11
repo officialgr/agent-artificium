@@ -88,9 +88,15 @@ def format_status(state: dict[str, Any]) -> str:
     process = state["process"]
     running = process["alive"] and process["owned"] is not False
     label = "running" if running else "stopped"
+    runtime = state.get("runtime") or {}
+    if running and runtime.get("status") == "blocked":
+        label = "running; model requests paused"
     if not state["configured"]:
         label = "not configured"
     lines = [f"Artificium: {label}", f"Root: {state['root']}"]
+    if running and runtime.get("status") == "blocked":
+        lines.append("Error: " + str(runtime.get("error", "unknown")))
+        lines.append("Correct the problem, then run: python3 artificium.py restart")
     if process["alive"]:
         lines.append(f"Process: {process['pid']}" + (" (lock belongs to another process)" if process["owned"] is False else ""))
     if state["configured"]:

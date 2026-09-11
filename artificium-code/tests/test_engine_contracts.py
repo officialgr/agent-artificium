@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import io
+import copy
 import tempfile
 import unittest
 import urllib.error
@@ -9,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from artificium.config import Config, load_api_key_file
-from artificium.engine import EngineError, make_engine
+from artificium.engine import EngineError, make_engine, _server_error
 from artificium.setup import ModelDiscovery, validate_discovered_settings
 
 
@@ -34,6 +35,33 @@ class DummyResponse:
 
 
 class EngineContractCase(unittest.TestCase):
+    def test_llamacpp_quotes_marker_text_without_changing_images_or_history(self) -> None:
+        marker = "<__media_0123456789abcdefghijklmnopqrstuv__>"
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": "Server properties: " + marker},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]}, {"role": "assistant", "content": marker, "reasoning_content": marker}]
+        original = copy.deepcopy(messages)
+        config = Config(provider="llamacpp", model="test", temperature=0.8, top_k=20)
+        prepared = make_engine(config, None).prepare(messages)
+        self.assertNotIn(marker, json.dumps(prepared.payload["messages"]))
+        self.assertEqual(prepared.payload["messages"][0]["content"][1], original[0]["content"][1])
+        self.assertEqual(prepared.payload["temperature"], 0.8)
+        self.assertEqual(prepared.payload["top_k"], 20)
+        self.assertEqual(messages, original)
+        other = make_engine(Config(provider="vllm", model="test"), None).prepare(messages)
+        self.assertEqual(other.payload["messages"], original)
+
+    def test_tokenization_rejection_is_actionable_and_does_not_disable_vision(self) -> None:
+        failure = _server_error('{"error":{"message":"Failed to tokenize prompt"}}', 400)
+        self.assertEqual(failure.kind, "tokenization")
+        self.assertTrue(failure.requires_operator_action)
+        self.assertFalse(failure.image_input_unsupported)
+        self.assertIn("reserved-marker", failure.hint)
+        genuine = _server_error('{"error":{"message":"image input is unsupported"}}', 415)
+        self.assertTrue(genuine.image_input_unsupported)
+        self.assertFalse(_server_error("mmproj: out of memory", 500).image_input_unsupported)
+
     def test_openrouter_uses_reasoning_object_and_strict_parameter_routing(self) -> None:
         config = Config(
             provider="openrouter",

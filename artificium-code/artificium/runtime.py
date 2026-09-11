@@ -11,7 +11,7 @@ from typing import Any
 from .config import ConfigStore, SecretsStore
 from .engine import Engine, EngineError, EngineReply, PreparedRequest, make_engine
 from .context_budget import (TokenCount, available_output, budget_request, context_exhausted,
-                             limit_output, measure, output_reserve)
+                             measure, minimum_generation_room)
 from .filesystem import (
     Paths,
     atomic_write_json,
@@ -369,7 +369,7 @@ class Artificium:
     ) -> tuple[str, EngineReply]:
         request_id = sortable_id("request_")
         request_log_path = self.paths.model_log / f"{request_id}.json"
-        prepared = prepared or limit_output(self.engine.prepare(messages), output_reserve(self.config), self.config)
+        prepared = prepared or self.engine.prepare(messages)
         count = count or measure(self.engine, prepared, messages, self.estimator)
         prepared = budget_request(prepared, self.config, count)
         estimated = count.tokens
@@ -738,7 +738,7 @@ class Artificium:
         pending = state.get("mandatory_offload_pending")
         if not pending and (
             estimated >= self.config.working_memory_limit * self.config.offload_threshold_percent / 100
-            or (generation_room is not None and generation_room < output_reserve(self.config))
+            or (generation_room is not None and generation_room < minimum_generation_room(self.config))
         ):
             state["mandatory_offload_pending"] = {"requested_at": utc_now(), "estimated_tokens": estimated}
             self.tools._save_control(state)
@@ -790,11 +790,10 @@ class Artificium:
                               "content": notice(str(self.paths.context_archive / ('emergency-' + 'x' * 100 + '.jsonl')))}],
                     include_images=False,
                 )
-                prepared = limit_output(self.engine.prepare(candidate), output_reserve(self.config), self.config)
+                prepared = self.engine.prepare(candidate)
                 count = measure(self.engine, prepared, candidate, self.estimator)
                 budget_request(prepared, self.config, count)
-                if (available_output(self.config, count) < output_reserve(self.config)
-                    or count.tokens >= self.config.working_memory_limit * self.config.offload_threshold_percent / 100):
+                if count.tokens >= self.config.working_memory_limit * self.config.offload_threshold_percent / 100:
                     raise EngineError("The rebuilt request still leaves too little room to continue. Pinned instructions or pending input may be too large.", kind="context")
                 if history != self.working.load():
                     raise EngineError("Working context changed during recovery; refusing to overwrite it.", kind="context")
@@ -1043,7 +1042,7 @@ class Artificium:
             count = None
             prepared = None
             try:
-                prepared = limit_output(self.engine.prepare(messages), output_reserve(self.config), self.config)
+                prepared = self.engine.prepare(messages)
                 count = measure(self.engine, prepared, messages, self.estimator)
                 mandatory_offload = self._mandatory_offload_required(
                     count.tokens, generation_room=available_output(self.config, count))
@@ -1053,7 +1052,7 @@ class Artificium:
                         input_tokens=count.tokens, token_count_source=count.source,
                         working_memory_tokens=self.config.working_memory_limit))
                     messages = self._request_messages(inputs, wake_reason=trigger)
-                    prepared = limit_output(self.engine.prepare(messages), output_reserve(self.config), self.config)
+                    prepared = self.engine.prepare(messages)
                     count = measure(self.engine, prepared, messages, self.estimator)
                 context_data = {
                     "round": round_number, "estimated_tokens": count.tokens,

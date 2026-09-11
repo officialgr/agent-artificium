@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Config
-from .context_budget import budget_request, limit_output, measure, output_reserve
+from .context_budget import TokenCount, budget_request, margin, measure, minimum_generation_room
 from .engine import EngineError, EngineReply, make_engine
 from .filesystem import Paths, read_json, read_jsonl, utc_now
 from .memory import TokenEstimator
@@ -77,7 +77,7 @@ def preview_messages(paths: Paths, config: Config, *, self_directive: str | None
 
 def prompt_tokens(config: Config, key: str | None, messages: list[dict[str, Any]]) -> tuple[int, str]:
     engine = make_engine(config, key)
-    prepared = limit_output(engine.prepare(messages), output_reserve(config), config)
+    prepared = engine.prepare(messages)
     count = measure(engine, prepared, messages, TokenEstimator(config.chars_per_token))
     return count.tokens, count.source
 
@@ -85,7 +85,8 @@ def prompt_tokens(config: Config, key: str | None, messages: list[dict[str, Any]
 def check_capacity(config: Config, tokens: int, source: str) -> None:
     # Reserve space for a useful answer (including reasoning). Never silently
     # truncate pinned memory/history or claim a larger server allocation.
-    reserve = output_reserve(config)
+    count = TokenCount(tokens, "estimate" if source == "estimate" else "provider")
+    reserve = minimum_generation_room(config) + margin(config, count)
     if tokens + reserve > config.context_window_tokens:
         approximate = "approximately " if source == "estimate" else ""
         required = tokens + reserve
@@ -151,7 +152,7 @@ def verify_connection(paths: Paths, config: Config, key: str | None, *,
     started = time.monotonic()
     messages = preview_messages(paths, config, self_directive=self_directive, include_images=False)
     engine = make_engine(config, key)
-    prepared = limit_output(engine.prepare(messages), output_reserve(config), config)
+    prepared = engine.prepare(messages)
     count = measure(engine, prepared, messages, TokenEstimator(config.chars_per_token))
     tokens, source = count.tokens, count.source
     check_capacity(config, tokens, source)
@@ -188,7 +189,7 @@ def verify_connection(paths: Paths, config: Config, key: str | None, *,
                     raise EngineError("This custom JSON contract does not transmit image data.", kind="vision",
                                       hint="Use a contract that maps multimodal messages, or keep image input disabled.")
                 with _progress(report, "Image check"):
-                    image_prepared = limit_output(image_engine.prepare(image_messages), output_reserve(vision_config), vision_config)
+                    image_prepared = image_engine.prepare(image_messages)
                     image_count = measure(image_engine, image_prepared, image_messages, TokenEstimator(config.chars_per_token))
                     image_engine.complete_prepared(budget_request(image_prepared, vision_config, image_count))
                 config = dataclasses.replace(config, model_supports_vision=True)

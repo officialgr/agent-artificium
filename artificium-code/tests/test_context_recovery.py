@@ -11,7 +11,7 @@ from unittest import mock
 from artificium.cli import _setup_options, build_parser
 from artificium.config import Config, ConfigStore
 from artificium.context_budget import (TokenCount, available_output, budget_request,
-                                      context_exhausted, measure, output_reserve)
+                                      context_exhausted, measure)
 from artificium.engine import Engine, EngineError, EngineReply, make_engine
 from artificium.filesystem import Paths, read_json, read_jsonl
 from artificium.memory import TokenEstimator
@@ -147,6 +147,68 @@ class CountingCase(unittest.TestCase):
                 with self.assertRaises(EngineError):
                     budget_request(prepared, config, TokenCount(103087, "provider"))
 
+    def test_unset_output_limit_uses_remaining_context_instead_of_a_fixed_default(self):
+        for provider, location in (
+            ("llamacpp", ("max_tokens",)), ("vllm", ("max_tokens",)),
+            ("openrouter", ("max_tokens",)), ("openai", ("max_output_tokens",)),
+            ("anthropic", ("max_tokens",)), ("gemini", ("generationConfig", "maxOutputTokens")),
+            ("ollama", ("options", "num_predict")),
+        ):
+            for context, expected in ((100000, 39000), (1_000_000, 930000)):
+                with self.subTest(provider=provider, context=context):
+                    config = self.config(provider, context_window_tokens=context,
+                                         working_memory_tokens=100000)
+                    prepared = make_engine(config, "key").prepare([{"role": "user", "content": "test"}])
+                    limited = budget_request(prepared, config, TokenCount(60000, "provider"))
+                    value = limited.payload
+                    for key in location:
+                        value = value[key]
+                    self.assertEqual(value, expected)
+                    self.assertIsNone(config.max_output_tokens)
+
+    def test_reported_model_limits_and_explicit_choices_are_preserved(self):
+        for provider, location in (
+            ("llamacpp", ("max_tokens",)), ("openrouter", ("max_tokens",)),
+            ("openai", ("max_output_tokens",)), ("anthropic", ("max_tokens",)),
+            ("gemini", ("generationConfig", "maxOutputTokens")),
+        ):
+            for chosen, reported, expected in (
+                (None, 65536, 65536), (100000, 131072, 100000),
+                (4096, 65536, 4096), (100000, 65536, 65536),
+            ):
+                with self.subTest(provider=provider, chosen=chosen, reported=reported):
+                    config = self.config(provider, context_window_tokens=1_000_000,
+                                         max_output_tokens=chosen,
+                                         model_capabilities={"max_output_tokens": reported})
+                    prepared = make_engine(config, "key").prepare([{"role": "user", "content": "test"}])
+                    value = budget_request(prepared, config, TokenCount(60000, "provider")).payload
+                    for key in location:
+                        value = value[key]
+                    self.assertEqual(value, expected)
+                    self.assertEqual(config.max_output_tokens, chosen)
+
+    def test_expert_output_limit_and_normal_reasoning_are_not_replaced(self):
+        for chosen in (4096, 100000):
+            config = self.config(context_window_tokens=1_000_000, reasoning_effort="medium",
+                                 request_options={"max_completion_tokens": chosen})
+            prepared = make_engine(config, None).prepare([{"role": "user", "content": "test"}])
+            body = budget_request(prepared, config, TokenCount(60000, "provider")).payload
+            self.assertEqual(body["max_completion_tokens"], chosen)
+            self.assertNotIn("max_tokens", body)
+            self.assertEqual(body["reasoning_effort"], "medium")
+            self.assertEqual(config.reasoning_effort, "medium")
+
+    def test_large_reasoning_budget_is_allowed_when_it_fits(self):
+        config = self.config("anthropic", context_window_tokens=200000,
+                             reasoning_budget_tokens=50000,
+                             model_capabilities={"max_output_tokens": 131072})
+        prepared = make_engine(config, "key").prepare([{"role": "user", "content": "test"}])
+        body = budget_request(prepared, config, TokenCount(60000, "provider")).payload
+        self.assertEqual(body["thinking"]["budget_tokens"], 50000)
+        self.assertEqual(body["max_tokens"], 131072)
+        with self.assertRaises(EngineError):
+            budget_request(prepared, config, TokenCount(160000, "provider"))
+
     def test_empty_reply_retains_usage_and_context_failure_is_distinct_from_output_limit(self):
         config = self.config(context_window_tokens=102400)
         engine = make_engine(config, None)
@@ -159,6 +221,15 @@ class CountingCase(unittest.TestCase):
         self.assertTrue(context_exhausted(caught.exception, config, TokenCount(81000, "estimate")))
         caught.exception.reply.usage = {"prompt_tokens": 1000, "completion_tokens": 1024}
         self.assertFalse(context_exhausted(caught.exception, config, TokenCount(1000, "provider")))
+        # Estimates leave a larger margin, but using all remaining output room
+        # is still a context-related failure. A smaller output cap is not.
+        count = TokenCount(80000, "estimate")
+        caught.exception.reply.usage = {"prompt_tokens": 80000, "completion_tokens": available_output(config, count)}
+        self.assertTrue(context_exhausted(caught.exception, config, count))
+        caught.exception.reply.usage = {"prompt_tokens": 80000, "completion_tokens": 1024}
+        self.assertFalse(context_exhausted(caught.exception, config, count))
+        caught.exception.reply.usage = {}
+        self.assertFalse(context_exhausted(caught.exception, config, count))
 
     def test_working_memory_tracks_or_decouples_without_increasing_server_context(self):
         config = self.config(context_window_tokens=1_000_000)

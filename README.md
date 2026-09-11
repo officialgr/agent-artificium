@@ -30,7 +30,7 @@ Extract the complete source archive. From the extracted project folder, run:
 python3 artificium.py
 ```
 
-The wizard asks for harness preferences—heartbeat, vision, working-memory target, and optional offloading—then your model service, address or key, and model. It detects context capacity where possible and uses server defaults for reasoning and sampling unless you customize them. Requests also reserve room for generation and have a bounded output allowance. Choose terminal chat after setup.
+The wizard asks for harness preferences—heartbeat, vision, working-memory target, and optional offloading—then your model service, address or key, and model. It detects context capacity where possible and uses server defaults for reasoning and sampling unless you customize them. Normal responses can use the remaining context; Artificium does not impose a fixed default output limit. Choose terminal chat after setup.
 
 Setup verifies the connection with real, potentially billable model requests before saving. It checks the full harness prompt and image input where applicable, without executing tools or retaining the diagnostic response.
 
@@ -429,7 +429,11 @@ When enabled, mandatory offloading is evaluated at inference boundaries. Reachin
 
 Token counting uses llama.cpp's native input-count endpoint when available; older builds can render and tokenize text-only requests. vLLM uses `/tokenize`; OpenAI Responses, Anthropic, and Gemini use their native input-count APIs. Unsupported endpoints, Ollama, OpenRouter, and generic/custom APIs retain the character estimate and image allowance. Counts are labelled `provider` or `estimate` in the life-loop. Provider counts may still differ from final usage, so generation leaves an additional margin.
 
-The complete input and the output allowance share the serving budget. The runtime supplies an output cap (normally up to 8,192 tokens when unset, smaller for small contexts), accounts for an explicit reasoning budget, and reduces the allowance when context is tight. Smaller explicit output caps are respected. Provider-specific output limits also apply to reasoning where the API supports that contract. Arbitrary custom JSON contracts need `$artificium.max_output_tokens` mapped to their real output-limit field. Exact counts cannot make an unbounded response fit in a finite window.
+Input, thinking, and the answer must fit the model's serving context. **There is no fixed default output cap for Artificium's normal requests.** When Maximum output tokens is unset, a request can use the remaining context, minus a safety margin for counting differences (1% for provider counts, 5% for estimates, at least 256 tokens). A smaller limit you explicitly set, or the model's reported output maximum, takes precedence. The working-memory target controls when to offload; it does not cap the length of an answer or reasoning.
+
+For example, with a 100,000-token serving context and 60,000 input tokens counted by the provider, the request allows up to 39,000 generated tokens, unless you or the provider impose a smaller limit. A 1,000,000-token context with the same input allows 930,000, subject to those same limits. These are allowances, not a requirement to generate that much. Reasoning shares the output allowance where the API counts it there. Normal reasoning settings are unchanged.
+
+The emergency summary helper has its own small output limit (up to 2,048 tokens); that applies only to its summary. Arbitrary custom JSON contracts need `$artificium.max_output_tokens` mapped to their real output-limit field. Providers may enforce lower output limits when their metadata does not report a maximum; set Maximum output tokens if required. Exact counts cannot make an unbounded response fit in a finite window.
 
 A large tool result can still cross a threshold in one step. A threshold below the pinned prompt size—or a checkpoint that barely reduces context—can repeatedly demand offloading. Keep the working-memory target large enough for the full harness prompt, and the serving context larger when possible. To resync a separate target after changing models, use `configure harness --working-memory-tokens same`.
 

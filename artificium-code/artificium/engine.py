@@ -1299,7 +1299,12 @@ class AnthropicEngine(JSONEngine):
                 converted[-1]["content"].extend(content)
             else:
                 converted.append({"role": role, "content": content})
-        max_tokens = self.config.max_output_tokens or 8192
+        # Messages requires max_tokens. Prefer the model's reported maximum when
+        # unset; runtime will reduce it to the space left after counting input.
+        model_limit = self.config.model_capabilities.get("max_output_tokens")
+        if not isinstance(model_limit, int) or isinstance(model_limit, bool) or model_limit < 1:
+            model_limit = self.config.context_window_tokens
+        max_tokens = self.config.max_output_tokens or model_limit
         payload: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": max_tokens,

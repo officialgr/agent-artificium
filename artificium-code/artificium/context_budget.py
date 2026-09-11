@@ -24,11 +24,9 @@ def measure(engine: Engine, prepared: PreparedRequest,
     return TokenCount(estimator.messages(messages), "estimate")
 
 
-def output_reserve(config: Config) -> int:
-    return config.max_output_tokens or max(
-        min(8192, config.context_window_tokens // 8),
-        (config.reasoning_budget_tokens or 0) + 1024,
-    )
+def minimum_generation_room(config: Config) -> int:
+    """Minimum room to proceed, never a maximum length for the response."""
+    return (config.reasoning_budget_tokens or 0) + 256
 
 
 def margin(config: Config, count: TokenCount) -> int:
@@ -82,15 +80,20 @@ def limit_output(prepared: PreparedRequest, limit: int, config: Config) -> Prepa
 
 def budget_request(prepared: PreparedRequest, config: Config, count: TokenCount) -> PreparedRequest:
     available = available_output(config, count)
-    if available < 256:
+    if available < minimum_generation_room(config):
         raise EngineError(
             f"Input ({count.tokens} tokens, {count.source}) leaves insufficient generation room "
             f"inside the {config.context_window_tokens}-token serving context.",
             kind="context", hint="Offload working memory or enable emergency offloading; history is retained.",
         )
-    if available < output_reserve(config) and (config.reasoning_budget_tokens or 0) >= available:
-        raise EngineError("Remaining context cannot fit the configured reasoning budget and an answer.", kind="context")
-    return limit_output(prepared, min(output_reserve(config), available), config)
+    # No harness default output cap. Use the remaining serving context, subject
+    # to an operator's explicit limit and the model's reported output maximum.
+    # limit_output also retains smaller values in expert request options.
+    limit = min(available, config.max_output_tokens or available)
+    model_limit = config.model_capabilities.get("max_output_tokens")
+    if isinstance(model_limit, int) and not isinstance(model_limit, bool) and model_limit > 0:
+        limit = min(limit, model_limit)
+    return limit_output(prepared, limit, config)
 
 
 def context_exhausted(error: EngineError, config: Config, count: TokenCount | None) -> bool:
@@ -100,10 +103,15 @@ def context_exhausted(error: EngineError, config: Config, count: TokenCount | No
     if not reply or reply.finish_reason not in {"length", "incomplete", "max_tokens", "MAX_TOKENS"}:
         return False
     usage = reply.usage
-    prompt = usage.get("prompt_tokens", usage.get("input_tokens", usage.get("promptTokenCount")))
-    generated = usage.get("completion_tokens", usage.get("output_tokens"))
+    prompt = usage.get("prompt_tokens", usage.get("input_tokens", usage.get("promptTokenCount", usage.get("prompt_eval_count"))))
+    generated = usage.get("completion_tokens", usage.get("output_tokens", usage.get("eval_count")))
+    if generated is None and isinstance(usage.get("candidatesTokenCount"), int):
+        generated = usage["candidatesTokenCount"] + (usage.get("thoughtsTokenCount") or 0)
     if isinstance(prompt, int) and isinstance(generated, int):
         if prompt + generated >= config.context_window_tokens - max(256, config.context_window_tokens // 100):
             return True
-    # The harness itself may have reduced the output cap to avoid filling context.
-    return count is not None and available_output(config, count) < output_reserve(config)
+    # A context-sized cap can stop output before the safety margin is used.
+    # Require evidence that generation actually used that room. An empty answer
+    # cut off by a smaller user/provider limit is not evidence of context overflow.
+    return (count is not None and isinstance(generated, int)
+            and generated >= max(1, available_output(config, count)))

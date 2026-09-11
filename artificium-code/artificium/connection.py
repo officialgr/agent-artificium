@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Config
-from .context_budget import TokenCount, budget_request, margin, measure, minimum_generation_room
+from .context_budget import TokenCount, check_input, margin, measure, minimum_generation_room
 from .engine import EngineError, EngineReply, make_engine
 from .filesystem import Paths, read_json, read_jsonl, utc_now
 from .memory import TokenEstimator
@@ -158,7 +158,8 @@ def verify_connection(paths: Paths, config: Config, key: str | None, *,
     check_capacity(config, tokens, source)
     report(f"Checking Artificium's full prompt: {tokens:,} input tokens ({source}). This sends a real request.")
     with _progress(report, "Model check"):
-        reply = engine.complete_prepared(budget_request(prepared, config, count))
+        check_input(config, count)
+        reply = engine.complete_prepared(prepared)
     actual = _input_tokens(reply)
     if reply.raw.get("truncated") is True:
         raise EngineError("The server truncated the connection-check prompt.", kind="context",
@@ -191,7 +192,8 @@ def verify_connection(paths: Paths, config: Config, key: str | None, *,
                 with _progress(report, "Image check"):
                     image_prepared = image_engine.prepare(image_messages)
                     image_count = measure(image_engine, image_prepared, image_messages, TokenEstimator(config.chars_per_token))
-                    image_engine.complete_prepared(budget_request(image_prepared, vision_config, image_count))
+                    check_input(vision_config, image_count)
+                    image_engine.complete_prepared(image_prepared)
                 config = dataclasses.replace(config, model_supports_vision=True)
                 vision_checked = True
                 report("Image connection passed.")

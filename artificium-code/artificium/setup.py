@@ -70,7 +70,7 @@ class SetupOptions:
     mandatory_offload: bool | None = None
     offload_threshold_percent: float | None = None
     working_memory_tokens: str | None = None
-    emergency_offload: bool | None = None
+    auto_repair: bool | None = None
     force: bool = False
 
 
@@ -631,7 +631,7 @@ class SetupWizard:
         values: dict[str, object] = {}
         if options.heartbeat_supplied:
             values["heartbeat_seconds"] = options.heartbeat_seconds
-        for name in ("mandatory_offload", "offload_threshold_percent", "emergency_offload"):
+        for name in ("mandatory_offload", "offload_threshold_percent", "auto_repair"):
             value = getattr(options, name)
             if value is not None:
                 values[name] = value
@@ -673,13 +673,13 @@ class SetupWizard:
             options.mandatory_offload = _yes("Require offloading at a working-memory threshold", current.mandatory_offload if current else False)
         if options.mandatory_offload and options.offload_threshold_percent is None:
             options.offload_threshold_percent = _number("Offload threshold percent", current.offload_threshold_percent if current else 80, minimum=1, maximum=95)
-        if options.emergency_offload is None:
-            options.emergency_offload = _yes("Allow an isolated summary helper to recover from context exhaustion", current.emergency_offload if current else False)
+        if options.auto_repair is None:
+            options.auto_repair = _yes("Try automatic repair after a rejected input or empty answer (up to 3 attempts)", current.auto_repair if current else False)
 
     @staticmethod
     def _validate_scope(options: SetupOptions) -> None:
         if options.scope == "model" and (options.heartbeat_supplied or any(
-            getattr(options, name) is not None for name in ("vision", "mandatory_offload", "offload_threshold_percent", "working_memory_tokens", "emergency_offload")
+            getattr(options, name) is not None for name in ("vision", "mandatory_offload", "offload_threshold_percent", "working_memory_tokens", "auto_repair")
         )):
             raise ValueError("Use configure harness for heartbeat, vision, and offloading settings")
         if options.scope == "harness" and (options.reset_generation_settings or any(

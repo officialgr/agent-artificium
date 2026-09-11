@@ -10,7 +10,7 @@ from typing import Any
 
 from .config import ConfigStore, SecretsStore
 from .engine import Engine, EngineError, EngineReply, PreparedRequest, make_engine
-from .context_budget import (TokenCount, available_output, budget_request, context_exhausted,
+from .context_budget import (TokenCount, available_output, check_input, context_exhausted,
                              measure, minimum_generation_room)
 from .filesystem import (
     Paths,
@@ -18,6 +18,7 @@ from .filesystem import (
     atomic_write_text,
     json_dumps,
     read_json,
+    read_jsonl,
     sortable_id,
     utc_now,
 )
@@ -27,7 +28,7 @@ from .life_loop import ToolIntent, parse_life_loop_output, render_normalized_lif
 from .memory import InfiniteAttention, LongTermMemory, TokenEstimator, WorkingMemory
 from .prompts import PromptPack
 from .records import Console, Records
-from .recovery import MAX_RECOVERY_ATTEMPTS, summarize
+from .recovery import MAX_RECOVERY_ATTEMPTS, repairable, summarize
 from .tool_loader import load_mind_tool
 from .tools import ToolExecution, ToolRegistry
 from .vision import VisualContext
@@ -371,7 +372,7 @@ class Artificium:
         request_log_path = self.paths.model_log / f"{request_id}.json"
         prepared = prepared or self.engine.prepare(messages)
         count = count or measure(self.engine, prepared, messages, self.estimator)
-        prepared = budget_request(prepared, self.config, count)
+        check_input(self.config, count)
         estimated = count.tokens
         request_parameters = prepared.safe_summary()
         request_parameters["token_count"] = {"tokens": count.tokens, "source": count.source}
@@ -748,85 +749,94 @@ class Artificium:
         return bool(pending)
 
     @property
-    def _emergency_state_path(self) -> Path:
-        return self.paths.runtime / "emergency-offload.json"
+    def _repair_state_path(self) -> Path:
+        return self.paths.runtime / "request-repair.json"
 
-    def _emergency_offload(self, error: EngineError, inputs: list[str]) -> bool:
-        """Replace working context only after a complete, bounded continuation fits.
+    def _repair_request(self, error: EngineError, inputs: list[str], *, context_error: bool) -> bool:
+        """Try earlier successful request inputs, never replay filesystem actions.
 
-        Incoming messages stay in the queue, and no prior tool action is replayed.
-        Attempts persist until a normal request succeeds, including across restart.
+        Existing assistant records supply the boundaries. Only a failed request
+        creates a recovery archive; normal execution needs no extra checkpoint.
         """
-        state = read_json(self._emergency_state_path, {})
-        history = self.working.load()
-        original_log = getattr(error, "request_log_path", None) or str(self.paths.model_log)
-        last_error = state.get("last_error") or str(error)
+        state = read_json(self._repair_state_path, {})
+        if not state:
+            archive = self.paths.context_archive / f"{sortable_id('repair_')}.jsonl"
+            atomic_write_text(archive, "".join(json_dumps(m) + "\n" for m in self.working.load()))
+            state = {"attempts": 0, "archive": str(archive),
+                     "original_log": getattr(error, "request_log_path", None) or str(self.paths.model_log)}
+        history = read_jsonl(Path(state["archive"]))
+        boundaries = [i for i, message in enumerate(history)
+                      if message.get("_artificium", {}).get("kind") == "life_loop_output"]
+        last_error = str(error)
         while int(state.get("attempts", 0)) < MAX_RECOVERY_ATTEMPTS and not self._stop:
             attempt = int(state.get("attempts", 0)) + 1
-            state.update(attempts=attempt, started_at=utc_now(), original_log=original_log,
-                         error=str(error), completed=False)
-            atomic_write_json(self._emergency_state_path, state)
-            self.console.line("recovery", f"Emergency summary attempt {attempt}/{MAX_RECOVERY_ATTEMPTS}")
-            self.records.life("emergency_offload_started", **state)
+            state.update(attempts=attempt, error=last_error, started_at=utc_now())
+            atomic_write_json(self._repair_state_path, state)
+            self.console.line("recovery", f"Request repair {attempt}/{MAX_RECOVERY_ATTEMPTS}")
+            self.records.life("request_repair_started", **state)
+            before = self.working.load()
             try:
-                summary, omitted = summarize(
-                    config=self.config, api_key=self.api_key, history=history,
-                    original_log=original_log, attempt=attempt,
-                    prompts=self.prompts, records=self.records,
-                )
+                # The final context-repair attempt uses the independent summary
+                # helper. It can also be used when no earlier request remains.
+                use_summary = context_error and (attempt == MAX_RECOVERY_ATTEMPTS or attempt > len(boundaries))
+                cut = boundaries[-attempt] if attempt <= len(boundaries) else 0
+                restored = history[:cut]
+                summary, omitted = "", False
+                if use_summary:
+                    summary, omitted = summarize(
+                        config=self.config, api_key=self.api_key, history=history,
+                        original_log=state["original_log"], attempt=attempt,
+                        prompts=self.prompts, records=self.records,
+                    )
+                    restored = []
                 if self._stop:
                     return False
-                checkpoint = self.paths.memory / "recovery" / f"{sortable_id('emergency_')}.txt"
-
-                def notice(archive: str) -> str:
-                    return self.prompts.event(
-                        "emergency_offload", error=str(error), original_log=original_log,
-                        archive=archive, checkpoint=str(checkpoint), omitted=omitted, summary=summary,
-                    )
-
-                candidate = self._request_messages(
-                    inputs, wake_reason="emergency_offload",
-                    working=[{"role": self.config.runtime_message_role,
-                              "content": notice(str(self.paths.context_archive / ('emergency-' + 'x' * 100 + '.jsonl')))}],
-                    include_images=False,
+                # Keep a compact pointer to later actions, not their potentially
+                # malformed/oversized output. Their full records stay in archive.
+                tools = sorted({str(m.get("_artificium", {}).get("tool")) for m in history[cut:]
+                                if m.get("_artificium", {}).get("kind") == "tool_result"})
+                release_images = context_error or error.kind in {"vision", "tokenization"}
+                notice = self.prompts.event(
+                    "request_repair", error=last_error, original_log=state["original_log"],
+                    archive=state["archive"], attempt=attempt,
+                    method="isolated summary" if use_summary else "earlier successful request context",
+                    later_tools=", ".join(tools) or "see archive",
+                    images_released=release_images, omitted=omitted,
+                    continuation=summary or ("Offload working memory before resuming the task." if context_error
+                                            else "Inspect what changed and correct the input before continuing."),
                 )
+                restored = [*restored, {"role": self.config.runtime_message_role, "content": notice}]
+                candidate = self._request_messages(inputs, wake_reason="request_repair", working=restored,
+                                                   include_images=not release_images)
                 prepared = self.engine.prepare(candidate)
                 count = measure(self.engine, prepared, candidate, self.estimator)
-                budget_request(prepared, self.config, count)
-                if count.tokens >= self.config.working_memory_limit * self.config.offload_threshold_percent / 100:
+                check_input(self.config, count)
+                if use_summary and count.tokens >= self.config.working_memory_limit * self.config.offload_threshold_percent / 100:
                     raise EngineError("The rebuilt request still leaves too little room to continue. Pinned instructions or pending input may be too large.", kind="context")
-                if history != self.working.load():
+                if before != self.working.load():
                     raise EngineError("Working context changed during recovery; refusing to overwrite it.", kind="context")
             except EngineError as exc:
                 last_error = str(exc)
-                state["last_error"] = last_error
-                atomic_write_json(self._emergency_state_path, state)
-                self.records.life("emergency_offload_failed", attempt=attempt, error=last_error)
+                context_error = context_error or exc.kind == "context"
+                state["error"] = last_error
+                atomic_write_json(self._repair_state_path, state)
+                self.records.life("request_repair_failed", attempt=attempt, error=last_error)
                 continue
-
-            # Commit uses the same archive/replacement mechanism as normal offloading.
-            # The helper never executes tools or writes to the agent's files itself.
-            atomic_write_text(checkpoint, summary + "\n")
-            result = self.working.offload(
-                title="emergency-context-recovery", compression=summary,
-                reason="context_exhaustion", memory_path=checkpoint,
-                replacement_builder=lambda values: notice(values["source_archive_path"]),
-            )
-            self.visual.release(all_images=True, reason="emergency_offload")
-            control = self.tools._control()
-            for key in ("working_memory_offload_pending", "mandatory_offload_pending", "compaction_pending"):
-                control.pop(key, None)
-            self.tools._save_control(control)
-            state.update(completed=True, checkpoint=str(checkpoint), archive=result["archive"])
-            atomic_write_json(self._emergency_state_path, state)
-            self.records.life("emergency_offload_completed", **state)
-            self.console.line("recovery", f"Working context recovered; archive: {result['archive']}")
+            atomic_write_text(self.paths.working_context, "".join(json_dumps(m) + "\n" for m in restored))
+            if release_images:
+                self.visual.release(all_images=True, reason="request_repair")
+            if use_summary:
+                control = self.tools._control()
+                for key in ("working_memory_offload_pending", "mandatory_offload_pending", "compaction_pending"):
+                    control.pop(key, None)
+                self.tools._save_control(control)
+            self.records.life("request_repair_ready", method="summary" if use_summary else "earlier context", **state)
             return True
         if self._stop:
             return False
         raise EngineError(
-            f"Emergency offloading stopped after {state.get('attempts', 0)} attempts: {last_error}",
-            kind="context", hint="Original records and pending messages are retained. Inspect the recovery logs before restarting.",
+            f"Automatic repair stopped after {state.get('attempts', 0)} attempts: {last_error}",
+            kind="repair", hint=f"History is retained in {state['archive']}; incoming messages and files are kept. Inspect the logs and correct the cause before restarting.",
         )
 
     def _offload_tool_error(self, intent: ToolIntent, call_index: int) -> dict[str, Any] | None:
@@ -1075,8 +1085,8 @@ class Artificium:
                     exc.request_log_path = str(self.paths.model_log / f"{failed_id}.json")
                     self.records.model_exchange(request_id=failed_id, messages=messages,
                                                 request_parameters=prepared.safe_summary() if prepared else {}, error=str(exc))
-                if self.config.emergency_offload and context_exhausted(exc, self.config, count):
-                    if self._emergency_offload(exc, inputs):
+                if self.config.auto_repair and repairable(exc, self.config, count):
+                    if self._repair_request(exc, inputs, context_error=context_exhausted(exc, self.config, count)):
                         pulse_used = first_wake_issued = meta_memory_guidance_issued = False
                         continue
                 raise
@@ -1111,7 +1121,7 @@ class Artificium:
                 )
                 break
             self._append_runtime(inputs, origin="life_loop_input")
-            self._emergency_state_path.unlink(missing_ok=True)
+            self._repair_state_path.unlink(missing_ok=True)
             self._acknowledge_recovery(recovery)
             for item in claimed:
                 self.notifications.commit(item)
@@ -1431,7 +1441,7 @@ class Artificium:
             "active_images": self.visual.list(),
             "context_window_tokens": self.config.context_window_tokens,
             "working_memory_tokens": self.config.working_memory_limit,
-            "emergency_offload": self.config.emergency_offload,
+            "auto_repair": self.config.auto_repair,
             "meta_memory_tokens": meta_metrics["tokens"],
             "meta_memory_words": meta_metrics["words"],
             "meta_memory_characters": meta_metrics["characters"],

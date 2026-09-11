@@ -10,7 +10,7 @@ from unittest import mock
 
 from artificium.cli import _setup_options, build_parser
 from artificium.config import Config, ConfigStore
-from artificium.context_budget import (TokenCount, available_output, budget_request,
+from artificium.context_budget import (TokenCount, available_output, check_input,
                                       context_exhausted, measure)
 from artificium.engine import Engine, EngineError, EngineReply, make_engine
 from artificium.filesystem import Paths, read_json, read_jsonl
@@ -119,95 +119,18 @@ class CountingCase(unittest.TestCase):
             path.write_bytes(b"changed after preflight")
             response = {"choices": [{"message": {"content": "received"}, "finish_reason": "stop"}]}
             with mock.patch.object(engine, "_post", return_value=response) as inference:
-                engine.complete_prepared(budget_request(prepared, config, count))
+                check_input(config, count)
+                engine.complete_prepared(prepared)
             self.assertEqual(inference.call_args.args[0].payload["messages"], count_call.call_args.kwargs["payload"]["messages"])
 
-    def test_generation_caps_share_room_with_reasoning_and_do_not_mutate_config(self):
-        for provider, location in (
-            ("llamacpp", ("max_tokens",)), ("vllm", ("max_tokens",)),
-            ("openrouter", ("max_tokens",)), ("openai", ("max_output_tokens",)),
-            ("anthropic", ("max_tokens",)), ("gemini", ("generationConfig", "maxOutputTokens")),
-            ("ollama", ("options", "num_predict")),
-        ):
-            with self.subTest(provider=provider):
-                config = self.config(provider, context_window_tokens=102400, max_output_tokens=20000)
-                engine = make_engine(config, "key")
-                prepared = engine.prepare([{"role": "user", "content": "test"}])
-                limited = budget_request(prepared, config, TokenCount(80000, "provider"))
-                value = limited.payload
-                for key in location:
-                    value = value[key]
-                self.assertEqual(value, 20000)
-                limited = budget_request(prepared, config, TokenCount(98000, "provider"))
-                value = limited.payload
-                for key in location:
-                    value = value[key]
-                self.assertLess(value + 98000, config.context_window_tokens)
-                self.assertEqual(config.max_output_tokens, 20000)
-                with self.assertRaises(EngineError):
-                    budget_request(prepared, config, TokenCount(103087, "provider"))
-
-    def test_unset_output_limit_uses_remaining_context_instead_of_a_fixed_default(self):
-        for provider, location in (
-            ("llamacpp", ("max_tokens",)), ("vllm", ("max_tokens",)),
-            ("openrouter", ("max_tokens",)), ("openai", ("max_output_tokens",)),
-            ("anthropic", ("max_tokens",)), ("gemini", ("generationConfig", "maxOutputTokens")),
-            ("ollama", ("options", "num_predict")),
-        ):
-            for context, expected in ((100000, 39000), (1_000_000, 930000)):
-                with self.subTest(provider=provider, context=context):
-                    config = self.config(provider, context_window_tokens=context,
-                                         working_memory_tokens=100000)
-                    prepared = make_engine(config, "key").prepare([{"role": "user", "content": "test"}])
-                    limited = budget_request(prepared, config, TokenCount(60000, "provider"))
-                    value = limited.payload
-                    for key in location:
-                        value = value[key]
-                    self.assertEqual(value, expected)
-                    self.assertIsNone(config.max_output_tokens)
-
-    def test_reported_model_limits_and_explicit_choices_are_preserved(self):
-        for provider, location in (
-            ("llamacpp", ("max_tokens",)), ("openrouter", ("max_tokens",)),
-            ("openai", ("max_output_tokens",)), ("anthropic", ("max_tokens",)),
-            ("gemini", ("generationConfig", "maxOutputTokens")),
-        ):
-            for chosen, reported, expected in (
-                (None, 65536, 65536), (100000, 131072, 100000),
-                (4096, 65536, 4096), (100000, 65536, 65536),
-            ):
-                with self.subTest(provider=provider, chosen=chosen, reported=reported):
-                    config = self.config(provider, context_window_tokens=1_000_000,
-                                         max_output_tokens=chosen,
-                                         model_capabilities={"max_output_tokens": reported})
-                    prepared = make_engine(config, "key").prepare([{"role": "user", "content": "test"}])
-                    value = budget_request(prepared, config, TokenCount(60000, "provider")).payload
-                    for key in location:
-                        value = value[key]
-                    self.assertEqual(value, expected)
-                    self.assertEqual(config.max_output_tokens, chosen)
-
-    def test_expert_output_limit_and_normal_reasoning_are_not_replaced(self):
-        for chosen in (4096, 100000):
-            config = self.config(context_window_tokens=1_000_000, reasoning_effort="medium",
-                                 request_options={"max_completion_tokens": chosen})
-            prepared = make_engine(config, None).prepare([{"role": "user", "content": "test"}])
-            body = budget_request(prepared, config, TokenCount(60000, "provider")).payload
-            self.assertEqual(body["max_completion_tokens"], chosen)
-            self.assertNotIn("max_tokens", body)
-            self.assertEqual(body["reasoning_effort"], "medium")
-            self.assertEqual(config.reasoning_effort, "medium")
-
-    def test_large_reasoning_budget_is_allowed_when_it_fits(self):
-        config = self.config("anthropic", context_window_tokens=200000,
-                             reasoning_budget_tokens=50000,
-                             model_capabilities={"max_output_tokens": 131072})
-        prepared = make_engine(config, "key").prepare([{"role": "user", "content": "test"}])
-        body = budget_request(prepared, config, TokenCount(60000, "provider")).payload
-        self.assertEqual(body["thinking"]["budget_tokens"], 50000)
-        self.assertEqual(body["max_tokens"], 131072)
+    def test_input_check_reserves_explicit_output_without_rewriting_it(self):
+        config = self.config(context_window_tokens=102400, max_output_tokens=20000)
+        check_input(config, TokenCount(80000, "provider"))
         with self.assertRaises(EngineError):
-            budget_request(prepared, config, TokenCount(160000, "provider"))
+            check_input(config, TokenCount(98000, "provider"))
+        with self.assertRaises(EngineError):
+            check_input(config, TokenCount(103087, "provider"))
+        self.assertEqual(config.max_output_tokens, 20000)
 
     def test_empty_reply_retains_usage_and_context_failure_is_distinct_from_output_limit(self):
         config = self.config(context_window_tokens=102400)
@@ -221,11 +144,11 @@ class CountingCase(unittest.TestCase):
         self.assertTrue(context_exhausted(caught.exception, config, TokenCount(81000, "estimate")))
         caught.exception.reply.usage = {"prompt_tokens": 1000, "completion_tokens": 1024}
         self.assertFalse(context_exhausted(caught.exception, config, TokenCount(1000, "provider")))
-        # Estimates leave a larger margin, but using all remaining output room
-        # is still a context-related failure. A smaller output cap is not.
+        # A length stop without evidence of context exhaustion remains a
+        # general empty-answer failure, not proof that the window was full.
         count = TokenCount(80000, "estimate")
         caught.exception.reply.usage = {"prompt_tokens": 80000, "completion_tokens": available_output(config, count)}
-        self.assertTrue(context_exhausted(caught.exception, config, count))
+        self.assertFalse(context_exhausted(caught.exception, config, count))
         caught.exception.reply.usage = {"prompt_tokens": 80000, "completion_tokens": 1024}
         self.assertFalse(context_exhausted(caught.exception, config, count))
         caught.exception.reply.usage = {}
@@ -254,7 +177,7 @@ class RecoveryCase(unittest.TestCase):
         shutil.copytree(ROOT / "artificium-code/prompts", self.paths.prompts)
         shutil.copyfile(ROOT / "mind/tools/scheduler.py", self.paths.created_tools / "scheduler.py")
         self.config = Config(provider="llamacpp", model="test-model", context_window_tokens=102400,
-                             max_life_loop_rounds=2, emergency_offload=True)
+                             max_life_loop_rounds=2, auto_repair=True)
         ConfigStore(self.paths).save(self.config)
         self.network = mock.patch("urllib.request.urlopen", side_effect=AssertionError("Unexpected network"))
         self.network.start()
@@ -287,8 +210,9 @@ class RecoveryCase(unittest.TestCase):
         self.assertNotIn("previous_response_id", request.payload)
         self.assertNotIn("Artificium", request.payload["messages"][0]["content"])
         self.assertNotIn(agent.paths.self_file.read_text().strip(), json.dumps(request.payload))
-        self.assertEqual(request.payload["chat_template_kwargs"]["enable_thinking"], False)
-        self.assertLessEqual(request.payload["max_tokens"], 2048)
+        self.assertNotIn("reasoning_effort", request.payload)
+        self.assertGreater(request.payload["max_tokens"], 2048)
+        self.assertLess(request.payload["max_tokens"], config.context_window_tokens)
         self.assertTrue(omitted)
         self.assertEqual(summary, SUMMARY)
         self.assertEqual(config.reasoning_effort, "medium")
@@ -316,10 +240,10 @@ class RecoveryCase(unittest.TestCase):
         self.assertEqual(len(archives), 1)
         self.assertEqual(archives[0].read_bytes(), previous)
         resumed = json.dumps(engine.requests[-1])
-        self.assertIn("EMERGENCY WORKING-MEMORY OFFLOAD", resumed)
+        self.assertIn("AUTOMATIC REQUEST REPAIR", resumed)
         self.assertIn("A new user message", resumed)
         self.assertIn("checkpoint", resumed.lower())
-        self.assertFalse(agent._emergency_state_path.exists())
+        self.assertFalse(agent._repair_state_path.exists())
         self.assertFalse(list(self.paths.notifications_new.glob(f"{notification.id}.json")))
         self.assertFalse(list(self.paths.notifications_processing.glob(f"{notification.id}.json")))
         preserved = [read_json(path) for directory in (self.paths.notifications_new, self.paths.notifications_delivered)
@@ -345,7 +269,7 @@ class RecoveryCase(unittest.TestCase):
         self.assertEqual(read_json(logs[0])["response"]["raw"], raw)
 
     def test_disabled_recovery_preserves_history_and_releases_claims(self):
-        ConfigStore(self.paths).save(dataclasses.replace(self.config, emergency_offload=False))
+        ConfigStore(self.paths).save(dataclasses.replace(self.config, auto_repair=False))
         agent = self.agent(SequenceEngine(EngineError("too many tokens", kind="context")))
         agent.working.append({"role": "user", "content": "Keep this exact history"}, origin="test")
         before = self.paths.working_context.read_bytes()
@@ -355,6 +279,102 @@ class RecoveryCase(unittest.TestCase):
         helper.assert_not_called()
         self.assertEqual(self.paths.working_context.read_bytes(), before)
         self.assertEqual(len(list(self.paths.notifications_new.glob("*.json"))), 1)
+
+    def add_successful_rounds(self, agent, rounds=4):
+        for index in range(1, rounds + 1):
+            agent.working.append({"role": "user", "content": f"INPUT_{index}"}, origin="test")
+            agent.working.append({"role": "assistant", "content": f"RESPONSE_{index}",
+                                  "_artificium": {"kind": "life_loop_output"}}, origin="test")
+            agent.working.append({"role": "user", "content": f"RESULT_{index}",
+                                  "_artificium": {"kind": "tool_result", "tool": "write_file"}}, origin="test")
+
+    def test_normal_runtime_leaves_generation_settings_unchanged(self):
+        for limit in (None, 50000):
+            config = dataclasses.replace(self.config, context_window_tokens=1_000_000,
+                                         max_output_tokens=limit, reasoning_effort="medium", temperature=0.3)
+            ConfigStore(self.paths).save(config)
+            engine = make_engine(config, None)
+            agent = self.agent(engine)
+            messages = [{"role": "user", "content": "Continue the work"}]
+            expected = engine.prepare(messages).payload
+            raw = {"choices": [{"message": {"content": "Continue."}, "finish_reason": "stop"}]}
+            with mock.patch.object(engine, "_post", return_value=raw) as post:
+                agent._complete(messages, wake_reason="test", count=TokenCount(60000, "provider"))
+            self.assertEqual(post.call_args.args[0].payload, expected)
+            self.assertEqual(expected.get("max_tokens"), limit)
+            self.assertEqual(expected["reasoning_effort"], "medium")
+
+    def test_rejected_input_uses_earlier_context_without_replaying_tools(self):
+        engine = SequenceEngine(EngineError("Failed to tokenize prompt", status=400, kind="tokenization"),
+                                EngineReply("<think>Inspect current files before continuing.</think>"))
+        agent = self.agent(engine)
+        self.add_successful_rounds(agent)
+        original = self.paths.working_context.read_bytes()
+        artifact = self.paths.space / "completed.txt"
+        artifact.write_text("already completed")
+        with mock.patch.object(agent.tools, "execute") as execute, mock.patch("artificium.runtime.summarize") as helper:
+            agent.run_turn()
+        execute.assert_not_called()
+        helper.assert_not_called()
+        retried = json.dumps(engine.requests[1])
+        self.assertIn("INPUT_4", retried)
+        self.assertIn("RESULT_3", retried)
+        self.assertNotIn("RESULT_4", retried)
+        self.assertIn("NOT rolled back", retried)
+        self.assertEqual(artifact.read_text(), "already completed")
+        archive = next(self.paths.context_archive.glob("repair_*.jsonl"))
+        self.assertEqual(archive.read_bytes(), original)
+
+    def test_three_retries_step_back_through_successful_inputs_then_pause(self):
+        ConfigStore(self.paths).save(dataclasses.replace(self.config, max_life_loop_rounds=10))
+        error = lambda: EngineError("Invalid conversation template", status=400, kind="template")
+        engine = SequenceEngine(error(), error(), error(), error())
+        agent = self.agent(engine)
+        self.add_successful_rounds(agent)
+        with mock.patch("artificium.runtime.summarize") as helper, self.assertRaisesRegex(EngineError, "after 3 attempts") as caught:
+            agent.run_turn()
+        self.assertTrue(caught.exception.requires_operator_action)
+        helper.assert_not_called()
+        self.assertEqual(len(engine.requests), 4)
+        for attempt, messages in enumerate(engine.requests[1:], 1):
+            text = json.dumps(messages)
+            self.assertIn(f"INPUT_{5-attempt}", text)
+            self.assertNotIn(f"RESULT_{5-attempt}", text)
+            self.assertEqual(text.count("AUTOMATIC REQUEST REPAIR"), 1)
+        restarted = self.agent(SequenceEngine(error()))
+        with self.assertRaisesRegex(EngineError, "after 3 attempts"):
+            restarted.run_turn()
+        self.assertEqual(read_json(agent._repair_state_path)["attempts"], 3)
+
+    def test_context_error_uses_summary_on_final_retry(self):
+        ConfigStore(self.paths).save(dataclasses.replace(self.config, max_life_loop_rounds=4))
+        error = lambda: EngineError("Context size exceeded", status=400, kind="context")
+        engine = SequenceEngine(error(), error(), error(), EngineReply("<think>Recovered.</think>"))
+        agent = self.agent(engine)
+        self.add_successful_rounds(agent)
+        with mock.patch("artificium.runtime.summarize", return_value=(SUMMARY, False)) as helper:
+            agent.run_turn()
+        self.assertEqual(helper.call_count, 1)
+        self.assertEqual(helper.call_args.kwargs["attempt"], 3)
+        self.assertEqual(len(engine.requests), 4)
+        self.assertIn(SUMMARY, json.dumps(engine.requests[-1]))
+        self.assertFalse(agent._repair_state_path.exists())
+
+    def test_auth_and_network_failures_do_not_rewind_history(self):
+        for kind, status in (("auth", 401), ("network", None), ("quota", 429), ("settings", 400)):
+            agent = self.agent(SequenceEngine(EngineError("Service or setting problem", kind=kind, status=status)))
+            self.add_successful_rounds(agent, rounds=1)
+            before = self.paths.working_context.read_bytes()
+            with self.assertRaises(EngineError):
+                agent.run_turn()
+            self.assertEqual(self.paths.working_context.read_bytes(), before)
+            self.assertFalse(agent._repair_state_path.exists())
+
+    def test_missing_image_is_a_repairable_input_error(self):
+        engine = make_engine(self.config, None)
+        with self.assertRaises(EngineError) as caught:
+            engine.prepare([{"role": "user", "content": [{"type": "artificium_image", "path": str(self.paths.space / "gone.png")}]}])
+        self.assertEqual(caught.exception.kind, "vision")
 
     def test_three_failed_attempts_survive_restart_and_do_not_replace_context(self):
         agent = self.agent(SequenceEngine(EngineError("context overflow", kind="context")))
@@ -370,7 +390,7 @@ class RecoveryCase(unittest.TestCase):
                 restarted.run_turn()
             self.assertEqual(helper.call_count, 3)
         self.assertEqual(self.paths.working_context.read_bytes(), before)
-        self.assertFalse(list(self.paths.context_archive.glob("*.jsonl")))
+        self.assertEqual(len(list(self.paths.context_archive.glob("*.jsonl"))), 1)
         self.assertEqual(len(list(self.paths.notifications_new.glob("*.json"))), 1)
 
     def test_native_count_triggers_offload_when_character_estimate_is_low(self):
@@ -396,10 +416,10 @@ class RecoveryCase(unittest.TestCase):
         agent = self.agent()
         self_before = self.paths.self_file.read_bytes()
         parser = build_parser()
-        args = parser.parse_args(["configure", "harness", "--working-memory-tokens", "50000", "--emergency-offload", "on", "--yes"])
+        args = parser.parse_args(["configure", "harness", "--working-memory-tokens", "50000", "--auto-repair", "on", "--yes"])
         updated = SetupWizard(self.paths).reconfigure(_setup_options(args))
         self.assertEqual((updated.working_memory_limit, updated.context_window_tokens), (50000, 102400))
-        self.assertTrue(updated.emergency_offload)
+        self.assertTrue(updated.auto_repair)
         updated = SetupWizard(self.paths).reconfigure(SetupOptions(scope="harness", working_memory_tokens="same"))
         self.assertIsNone(updated.working_memory_tokens)
         self.assertEqual(self.paths.self_file.read_bytes(), self_before)

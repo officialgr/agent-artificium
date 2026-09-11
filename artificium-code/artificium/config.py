@@ -139,7 +139,7 @@ class Config:
     mandatory_offload: bool = False
     offload_threshold_percent: float = 80.0
     working_memory_tokens: int | None = None
-    emergency_offload: bool = False
+    auto_repair: bool = False
     chars_per_token: float = 4.0
     broad_chunk_fraction: float = 0.50
     balanced_chunk_fraction: float = 0.20
@@ -225,8 +225,8 @@ class Config:
             or not 4000 <= self.working_memory_tokens <= self.context_window_tokens
         ):
             raise ValueError("working_memory_tokens must be null (same as model), or 4000 through context_window_tokens")
-        if not isinstance(self.emergency_offload, bool):
-            raise ValueError("emergency_offload must be boolean")
+        if not isinstance(self.auto_repair, bool):
+            raise ValueError("auto_repair must be boolean")
         if self.context_reminder_tokens < 1_000:
             raise ValueError("context_reminder_tokens must be at least 1000")
         if self.meta_memory_guidance_tokens < 1_000:
@@ -371,6 +371,8 @@ class Config:
                 value = {**harness, **model, "schema_version": 3}
         allowed = {item.name for item in dataclasses.fields(cls)}
         supplied = {key: item for key, item in value.items() if key in allowed}
+        if "auto_repair" not in supplied and "emergency_offload" in value:
+            supplied["auto_repair"] = value["emergency_offload"]
         old_schema = int(value.get("schema_version", 1) or 1)
         provider = str(value.get("provider") or "custom").lower().strip()
         if old_schema < 2 and provider in PROVIDERS:
@@ -390,7 +392,7 @@ class Config:
         values = self.public_dict()
         values.pop("schema_version", None)
         # Always show the small set of operator-facing harness policies.
-        for name in ("heartbeat_seconds", "vision_preference", "mandatory_offload", "offload_threshold_percent", "working_memory_tokens", "emergency_offload"):
+        for name in ("heartbeat_seconds", "vision_preference", "mandatory_offload", "offload_threshold_percent", "working_memory_tokens", "auto_repair"):
             values[name] = getattr(self, name)
         return {
             "schema_version": 3,

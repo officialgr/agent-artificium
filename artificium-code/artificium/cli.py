@@ -88,7 +88,7 @@ def _harness_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--mandatory-offload", choices=["on", "off"], help="Require memory offloading at the threshold (default: off)")
     group.add_argument("--offload-threshold", type=float, help="Working-memory percentage, 1–95 (default: 80)")
     group.add_argument("--working-memory-tokens", metavar="TOKENS|same", help="Offloading target; same tracks the model context (default)")
-    group.add_argument("--emergency-offload", choices=["on", "off"], help="Isolated summary helper for context exhaustion (default: off)")
+    group.add_argument("--auto-repair", "--emergency-offload", dest="auto_repair", choices=["on", "off"], help="Try earlier context after input failures; up to 3 attempts (default: off)")
 
 
 def _connection_arguments(parser: argparse.ArgumentParser, *, runtime_settings: bool = True) -> None:
@@ -271,7 +271,7 @@ def _setup_options(args: argparse.Namespace) -> SetupOptions:
         mandatory_offload=(getattr(args, "mandatory_offload") == "on" if getattr(args, "mandatory_offload", None) is not None else None),
         offload_threshold_percent=getattr(args, "offload_threshold", None),
         working_memory_tokens=getattr(args, "working_memory_tokens", None),
-        emergency_offload=(getattr(args, "emergency_offload") == "on" if getattr(args, "emergency_offload", None) is not None else None),
+        auto_repair=(getattr(args, "auto_repair") == "on" if getattr(args, "auto_repair", None) is not None else None),
         force=bool(getattr(args, "force", False)),
     )
 
@@ -360,7 +360,7 @@ def _has_reconfigure_values(args: argparse.Namespace) -> bool:
             "mandatory_offload",
             "offload_threshold",
             "working_memory_tokens",
-            "emergency_offload",
+            "auto_repair",
         )
     ) or hasattr(args, "heartbeat") or bool(
         getattr(args, "reset_generation_settings", False)
@@ -385,7 +385,7 @@ def _reconfigure(paths: Paths, args: argparse.Namespace) -> None:
           + (f"{updated.offload_threshold_percent:g}%" if updated.mandatory_offload else "off"))
     print(f"Working-memory target: {updated.working_memory_limit:,} tokens"
           + (" (same as model)" if updated.working_memory_tokens is None else "")
-          + f"; emergency offloading: {'on' if updated.emergency_offload else 'off'}")
+          + f"; automatic repair: {'on' if updated.auto_repair else 'off'}")
     if alive and pid:
         print(
             f"Artificium is currently running as PID {pid}. Restart it to apply "
@@ -791,8 +791,8 @@ def _print_life_record(line: str) -> None:
         source = value.get("token_count_source", "estimate")
         prefix = "~" if source == "estimate" else ""
         print(f"[context] {prefix}{tokens:,} / {window:,} tokens ({percent:.1f}%; {source})")
-    elif kind.startswith("emergency_offload_"):
-        print(f"[recovery] {kind.removeprefix('emergency_offload_')}: "
+    elif kind.startswith("request_repair_"):
+        print(f"[recovery] {kind.removeprefix('request_repair_')}: "
               f"{value.get('archive') or value.get('error') or value.get('attempts')}")
     elif kind == "guidance_notification":
         print(

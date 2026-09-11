@@ -30,7 +30,7 @@ Extract the complete source archive. From the extracted project folder, run:
 python3 artificium.py
 ```
 
-The wizard asks for harness preferences—heartbeat, vision, working-memory target, and optional offloading—then your model service, address or key, and model. It detects context capacity where possible and uses server defaults for reasoning and sampling unless you customize them. Normal responses can use the remaining context; Artificium does not impose a fixed default output limit. Choose terminal chat after setup.
+The wizard asks for harness preferences—heartbeat, vision, working-memory target, and optional recovery—then your model service, address or key, and model. It detects context capacity where possible and uses server defaults for reasoning and sampling unless you customize them. Choose terminal chat after setup.
 
 Setup verifies the connection with real, potentially billable model requests before saving. It checks the full harness prompt and image input where applicable, without executing tools or retaining the diagnostic response.
 
@@ -213,7 +213,7 @@ Optional **mandatory offloading** adds a runtime gate. It is off by default; whe
 
 The working-memory target defaults to the model's serving context, but can be smaller. For example, a model actually serving 1,000,000 tokens can use a 100,000-token working-memory target, leaving room to finish an offload. This target applies to the complete input, including pinned instructions and active images; it does not silently truncate history.
 
-Optional **emergency offloading**, also off by default, can recover from context exhaustion. An isolated request to the same configured model and API summarizes a bounded excerpt of working history. The helper has its own generic summarization prompt and no tools or Artificium Self instructions. A complete summary is checked for room to resume before the usual archive/replacement mechanism commits it. A harness-written notice explains the error, the helper's intervention, omissions, and where to find the original records. Incoming messages, Self, tool files, and completed actions are retained.
+Optional **automatic repair**, off by default, can recover from rejected input or an empty answer. It archives the history, tries an earlier successful request's context, and tells the agent what happened. There are at most three attempts. Persistent context exhaustion can use an isolated summary from the same configured model and API. Files, completed actions, and incoming messages are retained.
 
 </details>
 
@@ -407,7 +407,7 @@ Settings live in an atomically saved `artificium-code/config.json`, with separat
 ```bash
 python3 artificium.py configure harness --heartbeat 30 --vision auto
 python3 artificium.py configure harness --mandatory-offload on --offload-threshold 80
-python3 artificium.py configure harness --working-memory-tokens 100000 --emergency-offload on
+python3 artificium.py configure harness --working-memory-tokens 100000 --auto-repair on
 python3 artificium.py connect --reasoning auto
 python3 artificium.py restart
 ```
@@ -419,7 +419,7 @@ python3 artificium.py restart
 | `--mandatory-offload on` or `off` | Require a successful offload at the configured context threshold; **off by default**. |
 | `--offload-threshold PERCENT` | Working-memory threshold, from 1–95%; default 80%. |
 | `--working-memory-tokens TOKENS` or `same` | Target for offloading and attention chunk sizes; default `same` follows model context. Explicit targets must fit inside model context. |
-| `--emergency-offload on` or `off` | Allow an isolated summary helper to recover context exhaustion; **off by default**. |
+| `--auto-repair on` or `off` | Try earlier context after an input failure; at most three attempts. **Off by default**. |
 | `--context-window TOKENS` | Actual model serving capacity; changing this value alone cannot enlarge a server. |
 | `--request-timeout SECONDS` | Inference request timeout; default 600 seconds. |
 
@@ -427,19 +427,17 @@ python3 artificium.py restart
 
 When enabled, mandatory offloading is evaluated at inference boundaries. Reaching the threshold withholds ordinary tool actions and sleep until the two-stage offload succeeds. Memory preparation remains available, and the pending requirement survives restart. Context is not silently truncated to get past it.
 
-Token counting uses llama.cpp's native input-count endpoint when available; older builds can render and tokenize text-only requests. vLLM uses `/tokenize`; OpenAI Responses, Anthropic, and Gemini use their native input-count APIs. Unsupported endpoints, Ollama, OpenRouter, and generic/custom APIs retain the character estimate and image allowance. Counts are labelled `provider` or `estimate` in the life-loop. Provider counts may still differ from final usage, so generation leaves an additional margin.
+Token counting uses llama.cpp's native input-count endpoint when available; older builds can render and tokenize text-only requests. vLLM, OpenAI Responses, Anthropic, and Gemini use their input-count APIs. Unsupported endpoints retain the existing estimate. Counts are labelled `provider` or `estimate` in the life-loop and used to check capacity and trigger mandatory offloading.
 
-Input, thinking, and the answer must fit the model's serving context. **There is no fixed default output cap for Artificium's normal requests.** When Maximum output tokens is unset, a request can use the remaining context, minus a safety margin for counting differences (1% for provider counts, 5% for estimates, at least 256 tokens). A smaller limit you explicitly set, or the model's reported output maximum, takes precedence. The working-memory target controls when to offload; it does not cap the length of an answer or reasoning.
-
-For example, with a 100,000-token serving context and 60,000 input tokens counted by the provider, the request allows up to 39,000 generated tokens, unless you or the provider impose a smaller limit. A 1,000,000-token context with the same input allows 930,000, subject to those same limits. These are allowances, not a requirement to generate that much. Reasoning shares the output allowance where the API counts it there. Normal reasoning settings are unchanged.
-
-The emergency summary helper has its own small output limit (up to 2,048 tokens); that applies only to its summary. Arbitrary custom JSON contracts need `$artificium.max_output_tokens` mapped to their real output-limit field. Providers may enforce lower output limits when their metadata does not report a maximum; set Maximum output tokens if required. Exact counts cannot make an unbounded response fit in a finite window.
+The input check leaves a counting margin (1% for provider counts, 5% for estimates, at least 256 tokens) and room for any explicitly configured output/reasoning budget. **It does not rewrite normal generation settings or impose a fixed output cap.** Unset optional settings remain with the provider; Anthropic requires an output maximum and uses the model's reported maximum when available. Thinking and the answer still need to fit the serving context. A provider can reject or truncate generation when that room is exhausted; automatic repair can handle that failure when enabled.
 
 A large tool result can still cross a threshold in one step. A threshold below the pinned prompt size—or a checkpoint that barely reduces context—can repeatedly demand offloading. Keep the working-memory target large enough for the full harness prompt, and the serving context larger when possible. To resync a separate target after changing models, use `configure harness --working-memory-tokens same`.
 
-With emergency offloading enabled, context-size errors and identifiable context exhaustion during generation invoke the helper. Its input and output are bounded, it requests disabled or reduced reasoning where supported, and unsuccessful attempts use smaller excerpts. At most three helper generation attempts are allowed before pausing; this bound survives restart until a normal model request succeeds. Truncated or invalid summaries and replacements that still do not fit leave the current working history intact. The helper cannot repair oversized pinned instructions or an oversized pending message by deleting them. Authentication, network, and unrelated input errors keep their existing error handling.
+With `--auto-repair on`, context errors, tokenization/template errors, image errors, and empty or malformed responses can trigger recovery. The harness archives the original working history and tries the context before an earlier successful response, with a brief explanation. A second failure goes back further. For a context error, the final attempt uses an isolated summary helper; it may use that helper sooner if no earlier request remains. Three recovery attempts are allowed per incident, including across restarts, until a normal request succeeds. Authentication, network, quota, and configuration failures retain their existing handling.
 
-Helper requests are recorded in `logs/model/emergency_summary_*.json`; the checkpoint and recovery notice point to the original request and archived context. Checkpoints may omit information, so they are recovery aids, not lossless replacements for the archive. This feature supports the built-in API adapters; arbitrary custom JSON APIs retain their existing pause behavior. It improves continuity but cannot guarantee uninterrupted service.
+The helper uses the same model, API, and serving context with its own summary prompt, no tools or Self instructions, and server-default reasoning. Its input is reduced to fit within half the model context; its output limit uses the remaining room and any smaller configured or reported model limit. **There is no special 2K summary cap.** A complete summary and the rebuilt request are checked before replacing working history. Arbitrary custom JSON adapters support the earlier-context retries; the isolated helper requires a built-in adapter.
+
+Recovery changes conversation context only: it does not undo files or replay completed actions. The notice points to the original request and archive so the agent can inspect later tool results before acting again. User messages stay queued until accepted by a successful request; loaded images may be released from context, while their files remain. Helper requests are logged in `logs/model/emergency_summary_*.json`. If three attempts fail, the harness pauses with the records retained. Oversized pinned instructions, oversized pending input, or an unavailable provider can still require operator intervention.
 
 The complete meta-memory is pinned without silent truncation; its default 8,000-token guidance threshold is a reminder to reorganize it, not a hard cap. Self has a 50,000-character prompt limit. Keep Self focused on lasting purpose and meta-memory focused on essential knowledge and navigation; put detailed material in ordinary memory.
 

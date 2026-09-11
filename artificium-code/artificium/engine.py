@@ -52,7 +52,7 @@ class EngineError(RuntimeError):
         return self.status in {400, 401, 403, 404, 405, 413, 415, 422} or (
             self.status is None and self.kind in {
                 "settings", "auth", "permission", "not_found", "context",
-                "vision", "template", "tokenization", "tls",
+                "vision", "template", "tokenization", "tls", "repair",
             }
         )
 
@@ -74,7 +74,7 @@ def _server_error(detail: str, status: int | None = None) -> EngineError:
         kind, hint = "context", "The request does not fit the serving context. Increase the model server's context allocation or choose a model with more capacity; changing Artificium's number alone cannot enlarge a server."
     elif any(x in lower for x in ("failed to tokenize prompt", "number of media markers")):
         kind, hint = "tokenization", "The server rejected the prompt during tokenization. Inspect its logs and the saved request for reserved-marker collisions or malformed input; retry after correcting the request."
-    elif any(x in lower for x in (*_UNSUPPORTED_VISION_MESSAGES, "multimodal projector", "mmproj")):
+    elif any(x in lower for x in (*_UNSUPPORTED_VISION_MESSAGES, "multimodal projector", "mmproj", "invalid image", "failed to decode image", "could not decode image")):
         kind, hint = "vision", "This server cannot accept the image request. Use text-only input or load a vision-capable model and its image projector."
     elif status == 401:
         kind, hint = "auth", "The server rejected the API key. Enter the key for this endpoint."
@@ -285,10 +285,11 @@ def _reject(config: Config, provider: str, *names: str) -> None:
 
 def _image(path_value: str, supplied_mime: str | None = None) -> tuple[str, str]:
     path = Path(path_value).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(path)
     mime = supplied_mime or mimetypes.guess_type(path.name)[0] or "image/png"
-    return mime, base64.b64encode(path.read_bytes()).decode("ascii")
+    try:
+        return mime, base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError as exc:
+        raise EngineError(f"Cannot read image {path}: {exc}", kind="vision") from exc
 
 
 def _openai_content(content: Any) -> Any:
@@ -1300,7 +1301,7 @@ class AnthropicEngine(JSONEngine):
             else:
                 converted.append({"role": role, "content": content})
         # Messages requires max_tokens. Prefer the model's reported maximum when
-        # unset; runtime will reduce it to the space left after counting input.
+        # unset. Other adapters leave an unset output limit to the provider.
         model_limit = self.config.model_capabilities.get("max_output_tokens")
         if not isinstance(model_limit, int) or isinstance(model_limit, bool) or model_limit < 1:
             model_limit = self.config.context_window_tokens

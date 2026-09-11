@@ -79,7 +79,7 @@ class FinalReleaseCase(unittest.TestCase):
         return image
 
     def test_image_retry_keeps_exact_current_notification_batch_once(self):
-        engine = ScriptedEngine(EngineError('image rejected', status=415), '<think>Recovered.</think>')
+        engine = ScriptedEngine(EngineError('image input is unsupported', status=415), '<think>Recovered.</think>')
         agent = self.agent(engine)
         agent._append_runtime(['A prior notification already stored.'], origin='test')
         event, _ = ArtificiumClient(self.paths.root).send('room', sender='user', content='New event remains durable.')
@@ -98,17 +98,18 @@ class FinalReleaseCase(unittest.TestCase):
         self.assertFalse(receipt['handled_at'])
 
     def test_failed_image_retry_returns_notifications_to_queue(self):
-        engine = ScriptedEngine(EngineError('image rejected',status=415), EngineError('server unavailable',status=503))
+        engine = ScriptedEngine(EngineError('image input is unsupported',status=415), EngineError('server unavailable',status=503))
         agent = self.agent(engine)
         notification = agent.notifications.create(type='external_event',summary='Keep this notification',source='test')
         agent.visual.load([str(self.image())])
         with self.assertRaises(EngineError):
             agent.run_turn()
+        self.assertEqual(len(engine.requests), 2)
         self.assertTrue((self.paths.notifications_new/(notification.id+'.json')).exists())
         self.assertFalse(list(self.paths.notifications_delivered.glob('*.json')))
 
     def test_explicit_vision_yes_keeps_existing_no_fallback_behavior(self):
-        engine = ScriptedEngine(EngineError('image rejected',status=415))
+        engine = ScriptedEngine(EngineError('image input is unsupported',status=415))
         agent = self.agent(engine, vision='yes', vision_preference='yes')
         agent.visual.load([str(self.image())])
         with self.assertRaises(EngineError):

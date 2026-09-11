@@ -704,6 +704,10 @@ def _chat_repl(paths: Paths, entity: str | None, interaction: str | None, name: 
                     + (f" (PID {pid})" if alive and pid else "")
                     + f"\nTrace: {paths.life_loop_log}"
                 )
+                runtime = read_json(paths.runtime_state, {})
+                if alive and runtime.get("status") == "blocked":
+                    print("Model requests paused: " + str(runtime.get("error", "")))
+                    print("Correct the problem, then run: python3 artificium.py restart")
                 continue
             attachments: list[str] = []
             if content.startswith("/attach "):
@@ -803,6 +807,16 @@ def _print_life_record(line: str) -> None:
             f"{'failed' if kind.endswith('failed') else 'cancelled'} after "
             f"{float(value.get('duration_seconds', 0) or 0):.1f}s; "
             f"log={value.get('model_log_path')}"
+        )
+        if value.get("error"):
+            print("[engine] " + " ".join(str(value["error"]).splitlines())[:1600])
+        if value.get("hint"):
+            print("[engine] " + " ".join(str(value["hint"]).splitlines())[:1600])
+    elif kind == "engine_blocked":
+        print(
+            "[engine] Model requests paused; history and incoming messages are retained. "
+            "Correct the reported problem, then run: "
+            + str(value.get("recovery_command") or "python3 artificium.py restart")
         )
 
 

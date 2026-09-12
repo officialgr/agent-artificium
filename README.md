@@ -421,7 +421,16 @@ python3 artificium.py restart
 | `--working-memory-tokens TOKENS` or `same` | Target for offloading and attention chunk sizes; default `same` follows model context. Explicit targets must fit inside model context. |
 | `--auto-repair on` or `off` | Try earlier context after an input failure; at most three attempts. **Off by default**. |
 | `--context-window TOKENS` | Actual model serving capacity; changing this value alone cannot enlarge a server. |
-| `--request-timeout SECONDS` | Inference request timeout; default 600 seconds. |
+| `--request-timeout SECONDS` or `--request-timeout off` | Inference request timeout; **off by default**. A number enables a timeout of 1–86,400 seconds. Shell timeouts are separate. |
+
+Model settings → **Request timeout** accepts a number or `off`. For example,
+`python3 artificium.py configure model --request-timeout off --yes` disables it;
+use `--request-timeout 1800` for a 30-minute timeout. Restart a running agent
+after saving. Existing saved numeric timeouts are preserved when upgrading.
+With `off`, Artificium waits indefinitely for the model's response. Reported
+errors still follow the existing retry/repair/pause handling, but a request
+that never replies can require operator intervention. Provider or network
+limits can still end a request.
 
 ### Context and mandatory offloading
 
@@ -581,6 +590,10 @@ These are model-facing tool names, not additional CLI subcommands. The [tool con
 `load_attachment` and `compact_context` remain compatibility operations. Current usage favors explicit image loading or text reads, and `offload_working_memory`.
 
 Ordinary reads are bounded; oversized output is reported with source/output paths rather than silently treated as a complete reading. Use Infinite Attention for large text. Shell execution is synchronous, with a default 120-second timeout and a configurable per-call maximum of 3,600 seconds. Custom apparatus generally runs through the shell; placing an arbitrary Python file in `mind/tools/` does not automatically register a new native tool. The bundled scheduler has a specific runtime loading contract.
+
+A shell timeout returns an error to the agent with guidance to check surviving
+processes and saved output, then use background execution for long work. The
+harness does not automatically relaunch the command.
 
 ### Python clients
 

@@ -50,7 +50,8 @@ class SetupOptions:
     heartbeat_supplied: bool = False
     context_window_tokens: int | None = None
     context_window_source: str | None = None
-    request_timeout_seconds: float | None = None
+    # None leaves the saved setting alone; "off" explicitly disables it.
+    request_timeout_seconds: float | str | None = None
     reasoning: str | None = None
     reasoning_effort: str | None = None
     reasoning_budget_tokens: int | None = None

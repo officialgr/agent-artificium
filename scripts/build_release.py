@@ -25,12 +25,7 @@ def release_files(root: Path) -> dict[str, Path]:
             if path.suffix not in {'.py', '.md', '.txt', '.toml', '.json', '.yml', '.yaml'}:
                 continue
             files[rel.as_posix()] = path
-    prompts = root / 'artificium-code/prompts'
-    manifest = tomllib.loads((prompts / 'manifest.toml').read_text())
-    files['mind/self.txt'] = prompts / manifest['mind_seed']['self']
-    files['mind/meta_memory.md'] = prompts / manifest['mind_seed']['meta_memory']
-    for item in manifest['seed_memory']:
-        files['mind/memory/' + item['path']] = prompts / item['source']
+    # Text defaults ship only in prompts/mind-seed; initialization creates mind/.
     files['mind/tools/scheduler.py'] = root / 'mind/tools/scheduler.py'
     for path in files.values():
         if not path.is_file() or path.is_symlink():

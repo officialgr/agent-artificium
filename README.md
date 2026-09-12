@@ -672,6 +672,8 @@ Stop the agent and privately back up the **entire instance**, including configur
 
 Copy the new launcher, runtime, and support files into the instance while retaining its configuration, credentials, mind, and logs. Avoid overwriting the existing mind with fresh release seeds. Existing vision preferences are preserved; explicitly choose `--vision auto` if you want to reset that preference.
 
+**Upgrading an older Git checkout:** older versions tracked `mind/self.txt`, `mind/meta_memory.md`, and the pre-built files under `mind/memory/`. This version stops tracking those generated copies. A direct `git pull` can delete unchanged copies or conflict with learned changes. For this transition, use the backup-and-copy procedure above and retain the entire existing `mind/`; do not reset or delete it to resolve a Git conflict.
+
 Reconnect and start after the upgrade:
 
 ```bash
@@ -690,7 +692,9 @@ python3 -m unittest discover -s artificium-code/tests -q
 python3 scripts/build_release.py
 ```
 
-The builder creates a reproducible source ZIP with a fresh mind from canonical text seeds, excluding configuration, credentials, logs, and learned instance memory. The scheduler executable is included, so review its contents as well as code and prompt changes before publishing. Update canonical guides in `artificium-code/prompts/mind-seed/` when changing the shipped text seeds.
+Git checkouts and release ZIPs keep the starting Self, meta-memory, and memories only in [`artificium-code/prompts/mind-seed/`](artificium-code/prompts/mind-seed/). Setup or startup creates missing files under `mind/` from those seeds; existing instance files are preserved. Edit the seeds to change how new instances start. Generated text files under `mind/` are ignored by Git.
+
+The builder creates a reproducible source ZIP excluding configuration, credentials, logs, and learned instance memory. It ships the seeds without a second set of generated text copies. The scheduler executable at `mind/tools/scheduler.py` is still included, so review its contents as well as code and prompt changes before publishing.
 
 Offline tests cover runtime mechanics and request contracts. Evaluate model performance and continual improvement separately, with stated tasks, models, budgets, and success criteria.
 

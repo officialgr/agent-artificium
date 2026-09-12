@@ -46,6 +46,18 @@ under `logs/outputs/` and the bounded result reports its path. Build reusable
 agent apparatus and clients under `mind/tools/`; put ordinary projects,
 experiments, code, and writing under `mind/space/`.
 
+`run_shell` blocks your life-loop until the call returns. Keep foreground
+commands brief. Start potentially long calculations, builds, downloads and
+servers in the background, with output saved to a file and a recorded PID.
+Use the `cwd` argument to set their working directory.
+
+Check progress with brief later calls, or schedule a later check, and continue
+other useful work while the job runs. Do not wait for background jobs using
+long sleep commands or polling loops inside `run_shell`.
+
+A shell timeout does not guarantee that child processes stopped. Check for
+existing processes and results before restarting a timed-out job.
+
 ### `load_images`
 
 ```json

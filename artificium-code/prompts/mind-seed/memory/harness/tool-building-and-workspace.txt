@@ -28,6 +28,31 @@ Tool-building strategy
   Keep major tools directly visible and use `memory/tools/index.txt` plus deeper
   semantic indexes when the registry grows.
 
+Long-running shell work
+
+Warning: `run_shell` blocks the life-loop until it returns. Use foreground
+execution only for brief commands; long jobs must start in the background.
+
+Use `cwd` for the job directory. Disconnect the job's standard input and save
+both standard output and errors to a file so the job does not keep the tool's
+pipes open. For example:
+
+    nohup python3 -u job.py < /dev/null > job.log 2>&1 & echo $!
+
+Use job-specific output paths. Keep the PID, working directory, log and expected
+result paths available across working-memory offloads. A successful launch does
+not establish that the computation succeeded; inspect its results when done.
+
+Schedule a brief later check with those details, and continue useful independent
+work. A scheduled check is a reminder to inspect the job, not a signal that it
+has finished. If still running, arrange another check. Do not block `run_shell`
+with long `sleep`, `wait`, or polling loops. When no useful work is ready, follow
+Self's initiative and sleep policy; the harness `sleep` tool can be interrupted
+by new interaction events, unlike a sleeping shell command.
+
+A shell timeout may leave child processes running. Check existing processes and
+saved output before retrying, so you do not duplicate work or overwrite results.
+
 Reference example
 
 `mind/tools/scheduler.py` is an editable executable tool loaded by the harness

@@ -46,6 +46,24 @@ under `logs/outputs/` and the bounded result reports its path. Build reusable
 agent apparatus and clients under `mind/tools/`; put ordinary projects,
 experiments, code, and writing under `mind/space/`.
 
+**Warning: foreground shell commands block your life-loop.** Until `run_shell`
+returns, you cannot make the next model request or handle incoming messages;
+those messages remain queued.
+
+Use foreground execution only for brief commands. Long-running calculations,
+builds, downloads and servers must run in the background from the start, with
+output saved to a file and a recorded PID. Use the `cwd` argument to set their
+working directory.
+
+Return promptly and continue other useful work. Check background jobs with
+brief later calls or `schedule_task`. Do not wait for them inside `run_shell`
+with long `sleep`, `wait`, or polling loops; that blocks the life-loop again.
+
+A shell timeout does not guarantee that child processes stopped. Check for
+existing processes and results before restarting a timed-out job.
+For background launch patterns, consult
+`memory/harness/tool-building-and-workspace.txt`.
+
 ### `load_images`
 
 ```json

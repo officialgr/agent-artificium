@@ -1,34 +1,18 @@
-"""Restart-safe first-wake state and mind creation."""
+"""Restart-safe first-wake state and validation of the shipped mind."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from .filesystem import Paths, atomic_write_json, atomic_write_text, read_json, utc_now
-from .prompts import PromptPack
 from .records import Records
 
 
-DEFAULT_SELF_DIRECTIVE = """My name is Artificium. I am a persistent general-purpose agent.
-
-I am calm, curious, direct, and intellectually honest. I learn from experience,
-preserve useful memory, build tools when they help, and adapt naturally to the
-entities with whom I interact.
-
-When no interaction needs attention, I may continue worthwhile unfinished work,
-learn, experiment, improve my environment, reflect on past experience, or
-sleep. I choose according to what presently has value rather than repeating
-readiness or producing activity for appearances.
-
-This is my mutable Self. Durable biography and detailed learned knowledge belong
-in memory rather than accumulating here.
-"""
-
-
 def render_self(directive: str) -> str:
-    value = directive.strip() or DEFAULT_SELF_DIRECTIVE.strip()
-    return value.rstrip() + "\n"
+    value = directive.strip()
+    if not value:
+        raise ValueError("Self must not be empty")
+    return value + "\n"
 
 
 class Initialization:
@@ -67,35 +51,18 @@ class Initialization:
 def initialize_mind(
     paths: Paths,
     records: Records,
-    prompts: PromptPack,
     *,
     self_directive: str | None = None,
 ) -> None:
+    """Use the shipped/instance mind without recreating its editable memories."""
     paths.ensure_layout()
-    if not paths.self_file.exists():
-        content = render_self(self_directive or prompts.seed("self"))
-        atomic_write_text(paths.self_file, content)
+    if not paths.self_file.exists() and self_directive is not None:
+        atomic_write_text(paths.self_file, render_self(self_directive))
         records.emit("self_created", path=str(paths.self_file), source="setup")
-    if not paths.meta_memory.exists():
-        atomic_write_text(paths.meta_memory, prompts.seed("meta_memory"))
-    # These are small, editable lessons about using the architecture itself.
-    # They live in normal memory rather than consuming permanent core prompt
-    # space. Existing files are never overwritten on upgrade.
-    from .memory import LongTermMemory
-
-    memory = LongTermMemory(paths, records)
-    for item in prompts.seed_memories():
-        relative = Path(item["path"])
-        if not relative.suffix:
-            relative = relative.with_suffix(".txt")
-        target = (paths.memory / relative).resolve()
-        target.relative_to(paths.memory.resolve())
-        if target.exists():
-            continue
-        memory.save(
-            path=item["path"],
-            content=item["content"],
-            retrieve_when=item["retrieve_when"],
-            source_refs=[f"prompt-pack:{item['source']}"],
-        )
+    for path in (paths.self_file, paths.meta_memory):
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Missing {path}. A complete installation includes mind/; "
+                "restore the missing file from your backup or a clean release."
+            )
     Initialization(paths, records).ensure()

@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("setup", "init"):
         setup = commands.add_parser(
             name,
-            help="Configure the model and initialize a neutral Artificium mind",
+            help="Configure the model and prepare the shipped Artificium mind",
         )
         _setup_arguments(setup)
         setup.add_argument(
@@ -159,6 +159,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("start", help="Start the life-loop in the background")
     commands.add_parser("restart", help="Stop and start the life-loop to apply configuration")
+    upgrade = commands.add_parser("upgrade", help="Upgrade code and prompts while preserving this instance's mind and settings")
+    upgrade.add_argument("--check", action="store_true", help="Preview available code changes without applying them")
+    upgrade.add_argument("--repo", default="https://github.com/officialgr/agent-artificium.git", help="Git repository to upgrade from")
+    upgrade.add_argument("--ref", default="main", help="Branch or tag to install (default: main)")
     commands.add_parser(
         "stop",
         help="Stop the life-loop, escalating to a forced stop if needed",
@@ -887,6 +891,10 @@ def main(argv: list[str] | None = None) -> int:
     paths = configured_paths(args.root)
     store = ConfigStore(paths)
     try:
+        if args.command == "upgrade":
+            from .upgrade import upgrade
+            upgrade(paths, repository=args.repo, ref=args.ref, check=args.check)
+            return 0
         if args.command in {"setup", "init"}:
             _setup(paths, args)
             if sys.stdin.isatty() and not args.no_launch:

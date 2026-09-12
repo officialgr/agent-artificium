@@ -26,7 +26,7 @@ from .discovery import (ModelDiscovery, discover_models, discover_provider_model
                         discover_llamacpp_properties, detected_context_window,
                         _openai_base_root)
 from .filesystem import Paths, atomic_write_text
-from .initialization import DEFAULT_SELF_DIRECTIVE, initialize_mind, render_self
+from .initialization import initialize_mind, render_self
 from .prompts import PromptPack
 from .records import Records
 from .connection import verify_connection
@@ -898,7 +898,7 @@ class SetupWizard:
 
     def _directive(self, options: SetupOptions) -> str | None:
         if options.self_directive is not None or options.self_file is not None:
-            return self._text(options.self_directive, options.self_file, self.prompts.seed("self"))
+            return self._text(options.self_directive, options.self_file, "")
         return None
 
     def _verify(self, options: SetupOptions, config: Config, key: str) -> Config:
@@ -933,12 +933,14 @@ class SetupWizard:
         else:
             config, key = self._build(options)
             config = self._verify(options, config, key)
-        directive = self._text(options.self_directive, options.self_file, self.prompts.seed("self"))
+        directive = self._directive(options)
+        if directive is None:
+            directive = self.paths.self_file.read_text(encoding="utf-8")
         self.paths.ensure_layout()
         self_existed = self.paths.self_file.is_file()
         self._save_connection(config, key, options)
         records = Records(self.paths)
-        initialize_mind(self.paths, records, self.prompts, self_directive=directive)
+        initialize_mind(self.paths, records, self_directive=directive)
         if options.self_directive is not None or options.self_file is not None or not self_existed:
             atomic_write_text(self.paths.self_file, render_self(directive))
         records.emit("setup_completed", provider=config.provider, model=config.model,

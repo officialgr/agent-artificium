@@ -301,7 +301,7 @@ The instance persists working history, interactions, attention streams, scheduli
 
 Notification delivery uses a claim-and-commit process around inference. Failed requests release claimed notifications for retry; startup recovers interrupted claims and reconciles inbound events that lack receipts. These mechanisms preserve continuity, but external side effects still need care around retries.
 
-The release includes Self, meta-memory, ten operating memories, and the scheduler. Startup restores missing text seeds without overwriting existing memories; the first wake orients the agent to its environment. The scheduler executable must remain present and valid.
+The release includes Self, meta-memory, ten operating memories, and the scheduler. The pre-built mind is already present; the first wake orients the agent to its environment. Startup preserves the instance's memories and does not recreate guides it has deleted. The scheduler executable must remain present and valid.
 
 Together, the mind and logs preserve both selected learning and raw evidence. Back up both: logs contain resumable state as well as diagnostics, and Infinite Attention can revisit their contents when ordinary memory is incomplete.
 
@@ -666,35 +666,52 @@ Memory, attachments, backups, logs, and raw model requests may contain private d
 
 Do not delete Self, memory, or runtime state to repair an API setting. Timed-out inference is not blindly replayed; explicit transient HTTP failures receive bounded retries, and the life-loop can back off before continuing.
 
-### Back up and upgrade an existing instance
+### Upgrade Artificium
 
-Stop the agent and privately back up the **entire instance**, including configuration, credentials, `mind/`, and `logs/`. The logs directory contains resumable state as well as diagnostic evidence; it is not merely disposable output.
-
-Copy the new launcher, runtime, and support files into the instance while retaining its configuration, credentials, mind, and logs. Avoid overwriting the existing mind with fresh release seeds. Existing vision preferences are preserved; explicitly choose `--vision auto` if you want to reset that preference.
-
-**Upgrading an older Git checkout:** older versions tracked `mind/self.txt`, `mind/meta_memory.md`, and the pre-built files under `mind/memory/`. This version stops tracking those generated copies. A direct `git pull` can delete unchanged copies or conflict with learned changes. For this transition, use the backup-and-copy procedure above and retain the entire existing `mind/`; do not reset or delete it to resolve a Git conflict.
-
-Reconnect and start after the upgrade:
+From the existing project folder:
 
 ```bash
-python3 artificium.py connect
+python3 artificium.py stop
+python3 artificium.py upgrade
 python3 artificium.py start
 ```
 
-Use `connect --reset-generation-settings --reasoning auto` when you also want to clear old generation overrides. Scheduler changes require a restart; preserve any instance-specific scheduler work when reviewing an upgrade.
+`upgrade` downloads the latest `main` into a temporary checkout and updates the launcher, runtime, promptgramming, tests, examples, scripts, and documentation. It preserves the entire `mind/` (including agent-built tools and the editable scheduler), configuration, credentials, environment files, custom connection files at the code root, and existing logs. The agent must be stopped before changes are applied.
+
+Replaced or removed code is backed up under `logs/upgrades/`. If applying an update fails, the command attempts to restore that code and reports any restoration failure. Local edits inside the managed code directories are backed up and replaced, not merged. Keep a separate backup of the complete instance as well.
+
+Preview without stopping the agent or applying changes:
+
+```bash
+python3 artificium.py upgrade --check
+```
+
+Use `--ref BRANCH_OR_TAG` to select a version, or `--repo GIT_URL` for a fork. The command uses Git to download source; it does not pull, reset, or advance the Git branch inside the running instance's folder. Use `upgrade` for subsequent instance updates. Use a development checkout for Git work and release builds.
+
+For an older installation that does not have the `upgrade` command yet, stop it and run the new launcher against the existing folder. Run these commands **from your existing instance folder**:
+
+```bash
+python3 artificium.py stop
+ARTIFICIUM_UPGRADE_SOURCE=$(mktemp -d)
+git clone --depth 1 https://github.com/officialgr/agent-artificium.git "$ARTIFICIUM_UPGRADE_SOURCE"
+python3 "$ARTIFICIUM_UPGRADE_SOURCE/artificium.py" --root "$PWD" upgrade
+python3 artificium.py start
+```
+
+This preserves the existing mind and removes obsolete code, including the former `artificium-code/prompts/mind-seed/` copies. Updated operating memories in a release apply to new installations; an upgrade leaves the existing agent's learned versions alone.
 
 ### Development and release packaging
 
-From a development copy:
+From a development Git checkout, commit the intended release changes first:
 
 ```bash
 python3 -m unittest discover -s artificium-code/tests -q
 python3 scripts/build_release.py
 ```
 
-Git checkouts and release ZIPs keep the starting Self, meta-memory, and memories only in [`artificium-code/prompts/mind-seed/`](artificium-code/prompts/mind-seed/). Setup or startup creates missing files under `mind/` from those seeds; existing instance files are preserved. Edit the seeds to change how new instances start. Generated text files under `mind/` are ignored by Git.
+The only pre-built Self, meta-memory, and operating memories are the files under `mind/`; there is no separate seed tree. Edit those files in the development checkout to change the starting mind.
 
-The builder creates a reproducible source ZIP excluding configuration, credentials, logs, and learned instance memory. It ships the seeds without a second set of generated text copies. The scheduler executable at `mind/tools/scheduler.py` is still included, so review its contents as well as code and prompt changes before publishing.
+The builder packages committed files from `HEAD` (or `--ref COMMIT_OR_TAG`), excluding instance configuration, credentials, logs, and uncommitted learned changes. Review the committed mind and scheduler before publishing. Uncommitted code edits are also excluded, so a release always corresponds to the selected Git revision.
 
 Offline tests cover runtime mechanics and request contracts. Evaluate model performance and continual improvement separately, with stated tasks, models, budgets, and success criteria.
 

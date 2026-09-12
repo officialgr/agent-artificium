@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 import urllib.error
@@ -18,10 +19,7 @@ from artificium.cli import main, _stop_background
 from artificium.config import Config, ConfigStore
 from artificium.engine import make_engine, EngineError
 from artificium.filesystem import Paths, atomic_write_json
-from artificium.initialization import initialize_mind
 from artificium.operator import status_snapshot
-from artificium.prompts import PromptPack
-from artificium.records import Records
 from artificium.setup import SetupWizard, SetupOptions, ModelDiscovery, resolved_vision
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +47,7 @@ class ReleaseCase(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.paths = Paths(Path(self.temp.name) / 'instance')
         shutil.copytree(ROOT / 'artificium-code/prompts', self.paths.prompts)
+        shutil.copytree(ROOT / "mind", self.paths.mind, dirs_exist_ok=True)
         env = mock.patch.dict(os.environ, {}, clear=True)
         env.start()
         self.addCleanup(env.stop)
@@ -120,18 +119,14 @@ class ReleaseCase(unittest.TestCase):
         self.assertEqual(self.paths.self_file.read_bytes(),before)
 
     def test_setup_does_not_replace_existing_mind_or_memory(self):
-        self.paths.self_file.parent.mkdir(parents=True)
+        self.paths.self_file.parent.mkdir(parents=True, exist_ok=True)
         self.paths.self_file.write_text('My existing Self.')
-        self.paths.meta_memory.write_text('My learned memory map.')
         memory = self.paths.memory/'harness/infinite-attention.txt'
-        memory.parent.mkdir(parents=True)
+        memory.parent.mkdir(parents=True, exist_ok=True)
         memory.write_text('A verified learned strategy.')
-        seed = self.paths.prompts/'mind-seed/memory/harness/infinite-attention.txt'
-        seed.write_text('Updated starting advice for new instances.')
         with self.llama_server():
             SetupWizard(self.paths).run(SetupOptions(provider='llamacpp'))
         self.assertEqual(self.paths.self_file.read_text(),'My existing Self.')
-        self.assertEqual(self.paths.meta_memory.read_text(),'My learned memory map.')
         self.assertEqual(memory.read_text(),'A verified learned strategy.')
 
     def test_switching_provider_can_select_its_single_model(self):
@@ -222,7 +217,7 @@ class ReleaseCase(unittest.TestCase):
         self.assertEqual(before,after)
 
     def test_status_does_not_import_or_execute_mutable_scheduler(self):
-        self.paths.created_tools.mkdir(parents=True)
+        self.paths.created_tools.mkdir(parents=True, exist_ok=True)
         (self.paths.created_tools/'scheduler.py').write_text('raise RuntimeError("must not execute")')
         self.assertFalse(status_snapshot(self.paths)['configured'])
 
@@ -237,17 +232,16 @@ class ReleaseCase(unittest.TestCase):
             self.assertFalse(_stop_background(self.paths))
         kill.assert_not_called()
 
-    def test_clean_release_initializes_current_seeds_and_excludes_instance_data(self):
+    def test_clean_release_uses_committed_mind_and_excludes_instance_data(self):
         clone=Path(self.temp.name)/'source'
         shutil.copytree(ROOT,clone,ignore=shutil.ignore_patterns('__pycache__', '.git'))
-        (clone/'mind/memory/harness').mkdir(parents=True, exist_ok=True)
+        for command in (["git", "init", "-q"], ["git", "add", "."],
+                        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Clean release"]):
+            subprocess.run(command, cwd=clone, check=True, capture_output=True)
         (clone/'mind/self.txt').write_text('PRIVATE LIVE SELF')
         (clone/'mind/meta_memory.md').write_text('PRIVATE MEMORY MAP')
         (clone/'mind/memory/personal-secret.txt').write_text('private')
-        guide='harness/tool-building-and-workspace.txt'
-        (clone/'mind/memory'/guide).write_text('Stale or learned instance guide.')
-        seed=clone/'artificium-code/prompts/mind-seed/memory'/guide
-        seed.write_text(seed.read_text() + '\nUpdated seed for the fresh-install regression.\n')
+        (clone/'mind/memory/harness/tool-building-and-workspace.txt').write_text('PRIVATE LEARNED GUIDE')
         (clone/'artificium-code/config.json').write_text('{}')
         (clone/'artificium-code/.secrets.json').write_text('{"api_key":"private"}')
         spec=importlib.util.spec_from_file_location('build_release',ROOT/'scripts/build_release.py')
@@ -257,20 +251,11 @@ class ReleaseCase(unittest.TestCase):
         with zipfile.ZipFile(result) as archive:
             names=archive.namelist()
             self.assertFalse(any(name.endswith(('config.json','.secrets.json','personal-secret.txt')) for name in names))
-            self.assertFalse(any('/mind/memory/' in name or name.endswith(('/mind/self.txt', '/mind/meta_memory.md')) for name in names))
-            self.assertTrue(any(name.endswith('/mind/tools/scheduler.py') for name in names))
-            unpacked=Path(self.temp.name)/'unpacked'
-            archive.extractall(unpacked)
-        paths=Paths(next(unpacked.iterdir()))
-        self.assertFalse(paths.self_file.exists())
-        self.assertFalse(paths.meta_memory.exists())
-        self.assertFalse(paths.memory.exists())
-        prompts=PromptPack(paths)
-        initialize_mind(paths, Records(paths), prompts)
-        self.assertIn('persistent general-purpose agent', paths.self_file.read_text())
-        self.assertEqual(paths.meta_memory.read_text(), prompts.seed('meta_memory'))
-        self.assertFalse((paths.memory/'personal-secret.txt').exists())
-        for item in prompts.seed_memories():
-            self.assertEqual((paths.memory/item['path']).read_text().strip(), item['content'])
-        self.assertIn('Updated seed for the fresh-install regression.', (paths.memory/guide).read_text())
-        self.assertIn('Warning: `run_shell` blocks the life-loop', (paths.memory/guide).read_text())
+            self.assertEqual(sum('/mind/memory/' in name for name in names),10)
+            seed=next(name for name in names if name.endswith('/mind/self.txt'))
+            self.assertNotIn(b'PRIVATE LIVE SELF',archive.read(seed))
+            self.assertIn(b'persistent general-purpose agent',archive.read(seed))
+            self.assertFalse(any('/mind-seed/' in name for name in names))
+            guide=next(name for name in names if name.endswith('/mind/memory/harness/tool-building-and-workspace.txt'))
+            self.assertIn(b'Warning: `run_shell` blocks the life-loop', archive.read(guide))
+            self.assertNotIn(b'PRIVATE LEARNED GUIDE', archive.read(guide))

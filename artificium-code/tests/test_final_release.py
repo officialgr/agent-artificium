@@ -52,6 +52,7 @@ class FinalReleaseCase(unittest.TestCase):
         self.paths = Paths(Path(temporary.name))
         self.paths.ensure_layout()
         shutil.copytree(ROOT/'artificium-code/prompts', self.paths.prompts)
+        shutil.copytree(ROOT / "mind", self.paths.mind, dirs_exist_ok=True)
         shutil.copy2(ROOT/'mind/tools/scheduler.py', self.paths.created_tools/'scheduler.py')
         self.config = Config(provider='custom', model='test', base_url='http://example.invalid/v1',
                              context_window_tokens=50000, max_life_loop_rounds=1)

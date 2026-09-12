@@ -49,13 +49,10 @@ class PromptPack:
         result: list[str] = []
         result.extend(str(item) for item in self.manifest.get("always", []))
         result.extend(str(item) for item in self.manifest.get("tool_catalog", []))
-        for section in ("runtime", "events", "mind_seed"):
+        for section in ("runtime", "events"):
             value = self.manifest.get(section, {})
             if isinstance(value, dict):
                 result.extend(str(item) for item in value.values())
-        for item in self.manifest.get("seed_memory", []):
-            if isinstance(item, dict) and item.get("source"):
-                result.append(str(item["source"]))
         return result
 
     def validate(self) -> None:
@@ -88,29 +85,6 @@ class PromptPack:
     def event(self, name: str, **values: Any) -> str:
         relative = self.manifest["events"][name]
         return self.render_text(self._read(relative), values)
-
-    def seed(self, name: str) -> str:
-        return self._read(self.manifest["mind_seed"][name]) + "\n"
-
-    def seed_memories(self) -> list[dict[str, str]]:
-        result: list[dict[str, str]] = []
-        for item in self.manifest.get("seed_memory", []):
-            if not isinstance(item, dict):
-                continue
-            path = str(item.get("path") or "").strip()
-            source = str(item.get("source") or "").strip()
-            retrieve_when = str(item.get("retrieve_when") or "").strip()
-            if not path or not source or len(retrieve_when) < 12:
-                raise ValueError("each seed_memory needs path, source, and retrieve_when")
-            result.append(
-                {
-                    "path": path,
-                    "content": self._read(source),
-                    "retrieve_when": retrieve_when,
-                    "source": source,
-                }
-            )
-        return result
 
     def fingerprints(self) -> dict[str, str]:
         result: dict[str, str] = {}

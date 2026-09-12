@@ -34,11 +34,10 @@ def preview_messages(paths: Paths, config: Config, *, self_directive: str | None
     """
     prompts = PromptPack(paths)
     estimator = TokenEstimator(config.chars_per_token)
-    self_text = self_directive or (paths.self_file.read_text(encoding="utf-8", errors="replace")
-                                  if paths.self_file.is_file() else prompts.seed("self"))
+    self_text = self_directive or paths.self_file.read_text(encoding="utf-8", errors="replace")
     if len(self_text) > 50_000:
         self_text = self_text[:50_000].rstrip() + f"\n\n[PINNED FILE TRUNCATED: {len(self_text):,} characters; inspect {paths.self_file}]"
-    meta = paths.meta_memory.read_text(encoding="utf-8", errors="replace") if paths.meta_memory.is_file() else prompts.seed("meta_memory")
+    meta = paths.meta_memory.read_text(encoding="utf-8", errors="replace")
     pinned = prompts.runtime("pinned_mind", self_content=self_text.rstrip(), meta_memory_content=meta.rstrip())
     parts = [prompts.always(), pinned, prompts.tool_catalog()]
     history = read_jsonl(paths.working_context)

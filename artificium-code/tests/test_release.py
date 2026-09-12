@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 import urllib.error
@@ -46,6 +47,7 @@ class ReleaseCase(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.paths = Paths(Path(self.temp.name) / 'instance')
         shutil.copytree(ROOT / 'artificium-code/prompts', self.paths.prompts)
+        shutil.copytree(ROOT / "mind", self.paths.mind, dirs_exist_ok=True)
         env = mock.patch.dict(os.environ, {}, clear=True)
         env.start()
         self.addCleanup(env.stop)
@@ -117,10 +119,10 @@ class ReleaseCase(unittest.TestCase):
         self.assertEqual(self.paths.self_file.read_bytes(),before)
 
     def test_setup_does_not_replace_existing_mind_or_memory(self):
-        self.paths.self_file.parent.mkdir(parents=True)
+        self.paths.self_file.parent.mkdir(parents=True, exist_ok=True)
         self.paths.self_file.write_text('My existing Self.')
         memory = self.paths.memory/'harness/infinite-attention.txt'
-        memory.parent.mkdir(parents=True)
+        memory.parent.mkdir(parents=True, exist_ok=True)
         memory.write_text('A verified learned strategy.')
         with self.llama_server():
             SetupWizard(self.paths).run(SetupOptions(provider='llamacpp'))
@@ -215,7 +217,7 @@ class ReleaseCase(unittest.TestCase):
         self.assertEqual(before,after)
 
     def test_status_does_not_import_or_execute_mutable_scheduler(self):
-        self.paths.created_tools.mkdir(parents=True)
+        self.paths.created_tools.mkdir(parents=True, exist_ok=True)
         (self.paths.created_tools/'scheduler.py').write_text('raise RuntimeError("must not execute")')
         self.assertFalse(status_snapshot(self.paths)['configured'])
 
@@ -230,11 +232,16 @@ class ReleaseCase(unittest.TestCase):
             self.assertFalse(_stop_background(self.paths))
         kill.assert_not_called()
 
-    def test_clean_release_seeds_and_excludes_instance_data(self):
+    def test_clean_release_uses_committed_mind_and_excludes_instance_data(self):
         clone=Path(self.temp.name)/'source'
-        shutil.copytree(ROOT,clone,ignore=shutil.ignore_patterns('__pycache__'))
+        shutil.copytree(ROOT,clone,ignore=shutil.ignore_patterns('__pycache__', '.git'))
+        for command in (["git", "init", "-q"], ["git", "add", "."],
+                        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Clean release"]):
+            subprocess.run(command, cwd=clone, check=True, capture_output=True)
         (clone/'mind/self.txt').write_text('PRIVATE LIVE SELF')
+        (clone/'mind/meta_memory.md').write_text('PRIVATE MEMORY MAP')
         (clone/'mind/memory/personal-secret.txt').write_text('private')
+        (clone/'mind/memory/harness/tool-building-and-workspace.txt').write_text('PRIVATE LEARNED GUIDE')
         (clone/'artificium-code/config.json').write_text('{}')
         (clone/'artificium-code/.secrets.json').write_text('{"api_key":"private"}')
         spec=importlib.util.spec_from_file_location('build_release',ROOT/'scripts/build_release.py')
@@ -248,3 +255,7 @@ class ReleaseCase(unittest.TestCase):
             seed=next(name for name in names if name.endswith('/mind/self.txt'))
             self.assertNotIn(b'PRIVATE LIVE SELF',archive.read(seed))
             self.assertIn(b'persistent general-purpose agent',archive.read(seed))
+            self.assertFalse(any('/mind-seed/' in name for name in names))
+            guide=next(name for name in names if name.endswith('/mind/memory/harness/tool-building-and-workspace.txt'))
+            self.assertIn(b'Warning: `run_shell` blocks the life-loop', archive.read(guide))
+            self.assertNotIn(b'PRIVATE LEARNED GUIDE', archive.read(guide))

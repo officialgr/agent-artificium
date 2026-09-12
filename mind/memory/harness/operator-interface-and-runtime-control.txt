@@ -55,3 +55,13 @@ Never guess commands, config fields, attachment behavior, or event schema when
 the repository documentation can answer. Read the current guide, cite the local
 path to the operator, and preserve any verified recurring troubleshooting
 lesson by updating this memory or the appropriate harness/tool memory.
+
+Upgrades
+
+The operator can stop the life-loop, run `python3 artificium.py upgrade`, then
+start it again. `upgrade --check` previews changes while the agent is running.
+Upgrades replace managed code and promptgramming while preserving the entire
+instance mind, settings, credentials, and existing logs. They do not update or
+recreate operating memories or agent-built tools; those remain yours to maintain.
+Do not run an upgrade from inside an active life-loop. Consult README.md for
+version selection, backups, and upgrading older installations.

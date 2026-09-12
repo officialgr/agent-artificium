@@ -175,6 +175,7 @@ class RecoveryCase(unittest.TestCase):
         self.paths = Paths(Path(temporary.name))
         self.paths.ensure_layout()
         shutil.copytree(ROOT / "artificium-code/prompts", self.paths.prompts)
+        shutil.copytree(ROOT / "mind", self.paths.mind, dirs_exist_ok=True)
         shutil.copyfile(ROOT / "mind/tools/scheduler.py", self.paths.created_tools / "scheduler.py")
         self.config = Config(provider="llamacpp", model="test-model", context_window_tokens=102400,
                              max_life_loop_rounds=2, auto_repair=True)

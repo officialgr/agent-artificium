@@ -11,7 +11,8 @@ dist/
 artificium-code/config.json
 artificium-code/.secrets.json
 
-# Only the clean, shipped initial mind is public. Runtime content stays private.
+# Track the starting mind; use upgrade to preserve learned changes in instances.
+# Newly created instance files remain ignored.
 mind/*
 !mind/.gitkeep
 !mind/self.txt

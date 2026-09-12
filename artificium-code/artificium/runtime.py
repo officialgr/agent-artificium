@@ -95,7 +95,7 @@ class Artificium:
             sha256=self.prompt_pack_sha256,
             files=self.prompt_fingerprints,
         )
-        initialize_mind(paths, self.records, self.prompts)
+        initialize_mind(paths, self.records)
         self.notifications = NotificationStore(paths, self.records)
         self.notifications.recover()
         self.interactions = InteractionStore(paths, self.notifications, self.records)

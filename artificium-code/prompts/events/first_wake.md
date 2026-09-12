@@ -25,7 +25,7 @@ memory only if it contains information that will genuinely help future action;
 do not create ceremonial, repetitive, or speculative memories merely because
 this is a first wake.
 
-The harness has seeded content but has not invented semantic folder indexes.
+The shipped mind contains starting knowledge but no semantic folder indexes.
 During orientation, create or improve useful `index.txt` files and revise
 `meta_memory.md` yourself so every seeded branch is genuinely navigable. Verify
 that its **Available tools and apparatus** registry contains the verified

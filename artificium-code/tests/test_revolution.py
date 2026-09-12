@@ -174,6 +174,7 @@ class RevolutionCase(unittest.TestCase):
         self.paths = Paths(self.root)
         self.paths.ensure_layout()
         shutil.copytree(PROMPTS, self.paths.prompts)
+        shutil.copytree(REFERENCE_TOOLS.parent, self.paths.mind, dirs_exist_ok=True)
         shutil.copy2(
             REFERENCE_TOOLS / "scheduler.py", self.paths.created_tools / "scheduler.py"
         )
@@ -190,7 +191,7 @@ class RevolutionCase(unittest.TestCase):
         ConfigStore(self.paths).save(self.config)
         SecretsStore(self.paths).save_api_key("test-key")
         self.records = Records(self.paths)
-        initialize_mind(self.paths, self.records, self.prompts)
+        initialize_mind(self.paths, self.records)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -904,6 +905,7 @@ class RevolutionCase(unittest.TestCase):
         paths = Paths(other)
         paths.ensure_layout()
         shutil.copytree(PROMPTS, paths.prompts)
+        shutil.copytree(REFERENCE_TOOLS.parent, paths.mind, dirs_exist_ok=True)
         with mock.patch(
             "artificium.setup.discover_provider_models",
             return_value=ModelDiscovery(),
@@ -929,6 +931,7 @@ class RevolutionCase(unittest.TestCase):
         paths = Paths(other)
         paths.ensure_layout()
         shutil.copytree(PROMPTS, paths.prompts)
+        shutil.copytree(REFERENCE_TOOLS.parent, paths.mind, dirs_exist_ok=True)
         contract_path = Path(self.temporary.name) / "custom-contract.json"
         contract = {
             "url": "https://unusual.example/v2/generate?region=test",
@@ -1106,6 +1109,7 @@ class RevolutionCase(unittest.TestCase):
         paths = Paths(other)
         paths.ensure_layout()
         shutil.copytree(PROMPTS, paths.prompts)
+        shutil.copytree(REFERENCE_TOOLS.parent, paths.mind, dirs_exist_ok=True)
         with (
             mock.patch(
                 "artificium.setup.discover_provider_models",
@@ -1148,6 +1152,7 @@ class RevolutionCase(unittest.TestCase):
         paths = Paths(other)
         paths.ensure_layout()
         shutil.copytree(PROMPTS, paths.prompts)
+        shutil.copytree(REFERENCE_TOOLS.parent, paths.mind, dirs_exist_ok=True)
         with mock.patch(
             "artificium.setup.discover_provider_models",
             return_value=ModelDiscovery(),
@@ -1353,6 +1358,7 @@ class RevolutionCase(unittest.TestCase):
         paths = Paths(other)
         paths.ensure_layout()
         shutil.copytree(PROMPTS, paths.prompts)
+        shutil.copytree(REFERENCE_TOOLS.parent, paths.mind, dirs_exist_ok=True)
         with (
             mock.patch(
                 "artificium.setup.discover_provider_models",

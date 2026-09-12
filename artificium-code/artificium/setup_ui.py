@@ -4,9 +4,9 @@ from __future__ import annotations
 import copy
 import getpass
 
-from .config import Config, PROVIDERS, requires_api_key
+from .config import Config, PROVIDERS, parse_request_timeout, requires_api_key
 from .engine import EngineError
-from .setup import (ModelDiscovery, SetupOptions, _ask, _choice, _number, _yes,
+from .setup import (ModelDiscovery, SetupOptions, _ask, _choice, _yes,
                     choose_model, choose_provider, configure_generation_interactive,
                     configure_reasoning, configured_openrouter_provider,
                     custom_contract_requires_api_key, reasoning_label)
@@ -34,6 +34,21 @@ def edit_context(options: SetupOptions, config: Config | None) -> None:
             print("Enter at least 4,000 tokens, or auto. This must match the server's allocation.")
 
 
+def edit_request_timeout(options: SetupOptions, config: Config | None) -> None:
+    current = options.request_timeout_seconds
+    if current is None and config is not None:
+        current = config.request_timeout_seconds
+    while True:
+        raw = _ask("Request timeout in seconds, or off to wait indefinitely",
+                   "off" if current is None else str(current))
+        try:
+            seconds = parse_request_timeout(raw)
+            options.request_timeout_seconds = seconds if seconds is not None else "off"
+            return
+        except ValueError as exc:
+            print(exc)
+
+
 def model_editor(wizard, options: SetupOptions, current: Config | None) -> None:
     while True:
         config, _ = wizard._build(options, current)
@@ -41,7 +56,8 @@ def model_editor(wizard, options: SetupOptions, current: Config | None) -> None:
         print(f"  1. Reasoning: {reasoning_label(config)}")
         print(f"  2. Context capacity: {config.context_window_tokens:,}")
         print("  3. Sampling and output limits")
-        print(f"  4. Request timeout: {config.request_timeout_seconds:g} seconds")
+        timeout = config.request_timeout_seconds
+        print("  4. Request timeout: " + ("off (wait indefinitely)" if timeout is None else f"{timeout:g} seconds"))
         if config.provider == "openrouter":
             print("  5. Inference provider routing")
         print("  reset. Restore generation defaults")
@@ -56,7 +72,7 @@ def model_editor(wizard, options: SetupOptions, current: Config | None) -> None:
             configure_generation_interactive(options, current=config,
                 provider="llamacpp" if config.adapter == "llamacpp" else config.provider, model=config.model)
         elif action == "4":
-            options.request_timeout_seconds = _number("Request timeout in seconds", config.request_timeout_seconds, minimum=1, maximum=86400)
+            edit_request_timeout(options, config)
         elif action == "5" and config.provider == "openrouter":
             options.openrouter_provider = _ask("Inference provider slug, or automatic", configured_openrouter_provider(config.request_options) or "automatic")
         elif action == "reset":
@@ -168,7 +184,7 @@ def interactive_setup(wizard, options: SetupOptions | None = None, *, current: C
             elif action == "6":
                 wizard._clear_generation(options)
             elif action == "7":
-                options.request_timeout_seconds = _number("Request timeout in seconds", config.request_timeout_seconds if config else 600, minimum=1, maximum=86400)
+                edit_request_timeout(options, config or current)
             elif action == "8":
                 settings_reviewed = False
             wizard._discoveries.clear()

@@ -116,6 +116,20 @@ MODEL_FIELDS = frozenset({
 })
 
 
+def parse_request_timeout(value: float | str | None) -> float | None:
+    """None/off disables the inference timeout; a number keeps it bounded."""
+    if value is None or (isinstance(value, str) and value.strip().lower() == "off"):
+        return None
+    message = "Request timeout must be off or between 1 and 86,400 seconds"
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(message) from None
+    if isinstance(value, bool) or not 1 <= seconds <= 86_400:
+        raise ValueError(message)
+    return seconds
+
+
 @dataclass
 class Config:
     schema_version: int = 3
@@ -131,7 +145,7 @@ class Config:
     poll_seconds: float = 1.0
     context_window_tokens: int = 100_000
     context_window_source: str = "manual"
-    request_timeout_seconds: float = 600.0
+    request_timeout_seconds: float | None = None
     model_capabilities: dict[str, Any] = field(default_factory=dict)
     context_reminder_tokens: int = 10_000
     context_soft_fraction: float = 0.70
@@ -181,8 +195,7 @@ class Config:
     def __post_init__(self) -> None:
         if self.context_window_source not in {"manual", "detected", "default"}:
             raise ValueError("context_window_source must be manual, detected, or default")
-        if not 1 <= self.request_timeout_seconds <= 86_400:
-            raise ValueError("Request timeout must be between 1 and 86,400 seconds")
+        self.request_timeout_seconds = parse_request_timeout(self.request_timeout_seconds)
         if not isinstance(self.model_capabilities, dict):
             raise ValueError("model_capabilities must be an object")
         self.provider = self.provider.lower().strip()
@@ -391,6 +404,7 @@ class Config:
     def grouped_dict(self) -> dict[str, Any]:
         values = self.public_dict()
         values.pop("schema_version", None)
+        values["request_timeout_seconds"] = self.request_timeout_seconds
         # Always show the small set of operator-facing harness policies.
         for name in ("heartbeat_seconds", "vision_preference", "mandatory_offload", "offload_threshold_percent", "working_memory_tokens", "auto_repair"):
             values[name] = getattr(self, name)

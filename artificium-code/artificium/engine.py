@@ -93,7 +93,7 @@ def _server_error(detail: str, status: int | None = None) -> EngineError:
 
 
 def request_json(url: str, *, payload: dict[str, Any] | None = None,
-                 headers: dict[str, str] | None = None, timeout: float = 10,
+                 headers: dict[str, str] | None = None, timeout: float | None = 10,
                  attempts: int = 1, secrets: list[str | None] | None = None) -> dict[str, Any]:
     """One JSON transport for discovery, checks, and inference.
 
@@ -133,13 +133,15 @@ def request_json(url: str, *, payload: dict[str, Any] | None = None,
                 continue
             raise failure from exc
         except (TimeoutError, socket.timeout) as exc:
-            raise EngineError(f"The model did not finish within {timeout:g} seconds.", kind="timeout",
-                              hint="A local model may need longer to load or process Artificium's prompt. Increase Request timeout in model settings and check the server is still processing.") from exc
+            elapsed = f" after {timeout:g} seconds" if timeout is not None else ""
+            raise EngineError(f"The model request timed out{elapsed}.", kind="timeout",
+                              hint="Check that the server is still processing. Request timeout can be increased or set to off in model settings; the server or network may also impose timeouts.") from exc
         except urllib.error.URLError as exc:
             reason = exc.reason
             if isinstance(reason, (TimeoutError, socket.timeout)):
-                raise EngineError(f"The connection timed out after {timeout:g} seconds.", kind="timeout",
-                                  hint="Check the server is reachable; increase Request timeout if it is still loading.") from exc
+                elapsed = f" after {timeout:g} seconds" if timeout is not None else ""
+                raise EngineError(f"The connection timed out{elapsed}.", kind="timeout",
+                                  hint="Check the server is reachable. Request timeout can be increased or set to off; server and network timeouts still apply.") from exc
             if isinstance(reason, ssl.SSLError):
                 raise EngineError("TLS verification failed: " + _redact(str(reason), redactions), kind="tls",
                                   hint="Use the correct HTTPS address and a trusted server certificate.") from exc
@@ -433,7 +435,7 @@ class JSONEngine(HTTPMixin, Engine):
         try:
             raw = request_json(
                 url, payload=payload, headers={**prepared.headers, **self.config.headers},
-                timeout=min(10, self.config.request_timeout_seconds), attempts=1,
+                timeout=min(10, self.config.request_timeout_seconds or 10), attempts=1,
                 secrets=self._redaction_secrets(prepared),
             )
             count = raw.get(field)
@@ -459,7 +461,7 @@ class JSONEngine(HTTPMixin, Engine):
             return None
         root = self.config.base_url.removesuffix("/v1")
         kwargs = dict(headers={**prepared.headers, **self.config.headers},
-                      timeout=min(10, self.config.request_timeout_seconds), attempts=1,
+                      timeout=min(10, self.config.request_timeout_seconds or 10), attempts=1,
                       secrets=self._redaction_secrets(prepared))
         try:
             formatted = request_json(root + "/apply-template", payload=prepared.payload, **kwargs)

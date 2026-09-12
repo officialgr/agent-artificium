@@ -302,6 +302,9 @@ class ToolRegistry:
         else:
             try:
                 result = self._functions[intent.name](**intent.arguments)
+            except subprocess.TimeoutExpired as exc:
+                result = {"status": "error", "summary": f"TimeoutExpired: {exc}",
+                          "guidance": self.prompts.event("shell_timeout")}
             except Exception as exc:
                 result = {"status": "error", "summary": f"{type(exc).__name__}: {exc}"}
         if not isinstance(result, dict):

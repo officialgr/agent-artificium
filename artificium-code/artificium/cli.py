@@ -106,7 +106,7 @@ def _connection_arguments(parser: argparse.ArgumentParser, *, runtime_settings: 
         return
     parser.add_argument("--openrouter-provider", help="Inference provider slug, or automatic")
     parser.add_argument("--context-window", type=int, help="Actual serving capacity in tokens; discovered when available")
-    parser.add_argument("--request-timeout", type=float, help="Seconds to wait for inference (default: 600)")
+    parser.add_argument("--request-timeout", metavar="SECONDS|off", help="Seconds to wait for inference, or off to wait indefinitely (default: off)")
     _generation_arguments(parser)
 
 

@@ -671,8 +671,8 @@ Do not delete Self, memory, or runtime state to repair an API setting. Timed-out
 From the existing project folder:
 
 ```bash
-python3 artificium.py stop
-python3 artificium.py upgrade
+python3 artificium.py stop &&
+python3 artificium.py upgrade &&
 python3 artificium.py start
 ```
 
@@ -691,10 +691,10 @@ Use `--ref BRANCH_OR_TAG` to select a version, or `--repo GIT_URL` for a fork. T
 For an older installation that does not have the `upgrade` command yet, stop it and run the new launcher against the existing folder. Run these commands **from your existing instance folder**:
 
 ```bash
-python3 artificium.py stop
-ARTIFICIUM_UPGRADE_SOURCE=$(mktemp -d)
-git clone --depth 1 https://github.com/officialgr/agent-artificium.git "$ARTIFICIUM_UPGRADE_SOURCE"
-python3 "$ARTIFICIUM_UPGRADE_SOURCE/artificium.py" --root "$PWD" upgrade
+python3 artificium.py stop &&
+ARTIFICIUM_UPGRADE_SOURCE=$(mktemp -d) &&
+git clone --depth 1 https://github.com/officialgr/agent-artificium.git "$ARTIFICIUM_UPGRADE_SOURCE" &&
+python3 "$ARTIFICIUM_UPGRADE_SOURCE/artificium.py" --root "$PWD" upgrade &&
 python3 artificium.py start
 ```
 
